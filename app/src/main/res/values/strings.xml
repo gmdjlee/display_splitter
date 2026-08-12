@@ -1,0 +1,74 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Display Splitter</string>
+    <string name="accessibility_service_label">Display Splitter split control</string>
+    <string name="accessibility_service_description">Detects when a video app is on screen and adjusts the split-screen divider so the video fills the target aspect ratio on the inner display. It does not read personal content; it only observes which app is in the foreground and performs the divider drag gesture.</string>
+
+    <string name="status_idle">Ready</string>
+    <string name="status_engaging">Applying split…</string>
+    <string name="status_engaged">Split active</string>
+    <string name="status_failed">Couldn\'t apply split</string>
+    <string name="status_flex_paused">Paused in Flex mode</string>
+    <string name="status_cover_paused">Not available on the cover screen</string>
+
+    <string name="fail_no_service">Turn on the accessibility service to use split control.</string>
+    <string name="fail_no_target">Open a video app first.</string>
+    <string name="fail_not_inner">Only works on the inner screen.</string>
+    <string name="fail_flex">Paused in Flex mode.</string>
+    <string name="fail_ratio_off">Pick a target ratio first.</string>
+    <string name="fail_hole">Couldn\'t cover the camera hole. Try again.</string>
+    <string name="fail_split">Split screen didn\'t respond. Try again.</string>
+    <string name="fail_split_unavailable">This device blocked automatic split screen. Start split screen from Recents, then tap Apply.</string>
+
+    <string name="notif_channel_name">Floating control</string>
+    <string name="notif_title">Display Splitter is running</string>
+    <string name="notif_text">Floating control is available over video apps</string>
+    <string name="notif_stop">Stop</string>
+
+    <string name="perm_section_title">Permissions</string>
+    <string name="perm_overlay_title">Display over other apps</string>
+    <string name="perm_overlay_desc">Needed for the floating control bubble over video apps.</string>
+    <string name="perm_accessibility_title">Accessibility service</string>
+    <string name="perm_accessibility_desc">Needed to enter split screen and move the divider for you.</string>
+    <string name="perm_grant">Allow</string>
+    <string name="perm_notifications_title">Notifications</string>
+    <string name="perm_notifications_desc">Shows a quiet notification while the floating control runs.</string>
+
+    <string name="section_ratio">Target ratio</string>
+    <string name="ratio_desc">The video pane is resized so content this wide fills it exactly.</string>
+    <string name="ratio_off">Off</string>
+
+    <string name="section_position">Video position</string>
+    <string name="position_auto">Auto</string>
+    <string name="position_auto_desc">Opposite the camera hole</string>
+    <string name="position_first">Top / Left</string>
+    <string name="position_second">Bottom / Right</string>
+
+    <string name="section_bubble">Floating bubble</string>
+    <string name="bubble_show">Show floating bubble</string>
+    <string name="bubble_opacity">Bubble opacity</string>
+
+    <string name="section_apps">Video apps</string>
+    <string name="apps_desc">The bubble appears when one of these apps is on the inner screen.</string>
+    <string name="apps_not_installed">Not installed</string>
+
+    <string name="section_behavior">Behavior</string>
+    <string name="auto_reengage">Re-apply after unfolding</string>
+    <string name="auto_reengage_desc">If the split was active when you closed the phone, apply it again on the inner screen.</string>
+    <string name="auto_engage">Apply automatically</string>
+    <string name="auto_engage_desc">Apply the split as soon as a video app opens, without tapping the bubble.</string>
+
+    <string name="engage_now">Apply split</string>
+    <string name="disengage">Restore full screen</string>
+    <string name="open_settings">Settings</string>
+    <string name="close">Close</string>
+
+    <string name="spacer_exit">Restore full screen</string>
+    <string name="spacer_flip">Flip video position</string>
+
+    <string name="about_footer">Only the inner screen is adjusted. Flex mode and the cover screen are never touched. Subtitles and gestures stay with the video app and One UI.</string>
+
+    <string name="bubble_content_desc">Display Splitter control</string>
+    <string name="engaged_ratio_fmt">Video pane %1$s</string>
+    <string name="letterbox_note_vertical">Side-by-side split: exact wide ratios are not possible — the spacer covers the camera hole instead.</string>
+</resources>
