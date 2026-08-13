@@ -16,9 +16,8 @@
     <string name="fail_not_inner">내부 화면에서만 동작해요.</string>
     <string name="fail_flex">플렉스 모드에서는 일시 중지돼요.</string>
     <string name="fail_ratio_off">먼저 목표 화면비를 선택해 주세요.</string>
-    <string name="fail_hole">카메라 홀을 가리지 못했어요. 다시 시도해 주세요.</string>
     <string name="fail_split">분할 화면이 응답하지 않았어요. 다시 시도해 주세요.</string>
-    <string name="fail_split_unavailable">이 기기에서는 자동 분할이 제한돼요. 최근 앱에서 분할 화면을 켠 뒤 적용을 눌러 주세요.</string>
+    <string name="fail_split_unavailable">분할 화면에 자동으로 들어가지 못했어요. 적용을 다시 눌러 주세요.</string>
 
     <string name="notif_channel_name">플로팅 컨트롤</string>
     <string name="notif_title">디스플레이 스플리터 실행 중</string>
@@ -41,8 +40,8 @@
     <string name="section_position">영상 위치</string>
     <string name="position_auto">자동</string>
     <string name="position_auto_desc">카메라 홀 반대편</string>
-    <string name="position_first">위 / 왼쪽</string>
-    <string name="position_second">아래 / 오른쪽</string>
+    <string name="position_first">위</string>
+    <string name="position_second">아래</string>
 
     <string name="section_bubble">플로팅 버블</string>
     <string name="bubble_show">플로팅 버블 표시</string>
@@ -55,8 +54,6 @@
     <string name="section_behavior">동작</string>
     <string name="auto_reengage">펼치면 다시 적용</string>
     <string name="auto_reengage_desc">화면을 닫을 때 분할이 켜져 있었다면, 다시 펼쳤을 때 자동으로 적용해요.</string>
-    <string name="auto_engage">자동 적용</string>
-    <string name="auto_engage_desc">버블을 누르지 않아도 영상 앱이 열리면 바로 분할을 적용해요.</string>
 
     <string name="engage_now">분할 적용</string>
     <string name="disengage">전체 화면으로</string>
@@ -65,10 +62,12 @@
 
     <string name="spacer_exit">전체 화면으로</string>
     <string name="spacer_flip">영상 위치 바꾸기</string>
+    <!-- 분할 파트너 피커에 노출되는 스페이서 라벨. 앱 이름과 서로 부분 문자열이면 안 됨
+         (진입 레시피가 contains(라벨)로 피커 노드를 찾음). -->
+    <string name="spacer_label">DS 스페이서</string>
 
     <string name="about_footer">내부 화면에서만 동작해요. 플렉스 모드와 커버 화면에는 관여하지 않아요. 자막과 제스처는 영상 앱과 One UI 설정을 그대로 따라요.</string>
 
     <string name="bubble_content_desc">디스플레이 스플리터 컨트롤</string>
     <string name="engaged_ratio_fmt">영상 창 %1$s</string>
-    <string name="letterbox_note_vertical">좌우 분할에서는 와이드 비율을 정확히 만들 수 없어 카메라 홀을 가리는 방식으로 동작해요.</string>
 </resources>

@@ -131,6 +131,9 @@ class DividerAccessibilityService : AccessibilityService() {
     }
 
     fun displayCutoutRects(): List<Rect> {
+        // One UI 8.5 hides the cutout from third-party apps entirely (empty here too);
+        // RatioMath.resolveVideoSide treats "no cutout data" as hole-on-top, which is
+        // correct for every current fold. AOSP builds report it normally.
         val wm = getSystemService(WindowManager::class.java)
         return wm.maximumWindowMetrics.windowInsets.displayCutout?.boundingRects ?: emptyList()
     }
@@ -170,46 +173,56 @@ class DividerAccessibilityService : AccessibilityService() {
 
     // ---- actions -----------------------------------------------------------------------------
 
-    /**
-     * Legacy split entry for Android <= 12 only. GLOBAL_ACTION_TOGGLE_SPLIT_SCREEN was
-     * removed from the framework in Android 13, so we feature-detect it via
-     * [getSystemActions] and never call a removed action blind.
-     */
-    fun tryLegacyToggle(): Boolean {
-        if (Build.VERSION.SDK_INT > Build.VERSION_CODES.S_V2) return false
-        val available = systemActions.any { it.id == GLOBAL_ACTION_TOGGLE_SPLIT_SCREEN }
-        return available && performGlobalAction(GLOBAL_ACTION_TOGGLE_SPLIT_SCREEN)
-    }
-
     /** Press-hold, then drag the divider to the target. Suspends until the gesture completes. */
-    suspend fun dragDivider(from: Point, to: Point): Boolean {
-        // A short initial hold lets the divider register the grab before movement starts.
+    suspend fun dragDivider(from: Point, to: Point): Boolean =
+        holdThenDrag(from, to, HOLD_MS, DRAG_MS)
+
+    /**
+     * Long-press at [from], then drag to [to] — the accessibility equivalent of
+     * `input draganddrop`. Two measured One UI traps shape this implementation:
+     * the hold and the move must be dispatched as SEPARATE gestures (a continueStroke
+     * bundled into one GestureDescription reports a fake onCompleted in ~8ms and moves
+     * nothing), and the hold stroke needs a 1px drift — a zero-length hold path is
+     * silently ineffective for drag-and-drop pickup (far below touch slop, so it never
+     * disturbs long-press recognition).
+     */
+    suspend fun holdThenDrag(from: Point, to: Point, holdMs: Long, moveMs: Long): Boolean {
+        val fx = from.x.toFloat()
+        val fy = from.y.toFloat()
         val holdStroke = GestureDescription.StrokeDescription(
-            Path().apply { moveTo(from.x.toFloat(), from.y.toFloat()) },
-            0, HOLD_MS, true,
+            Path().apply {
+                moveTo(fx, fy)
+                lineTo(fx + 1f, fy)
+            },
+            0, holdMs, true,
         )
         val dragStroke = holdStroke.continueStroke(
             Path().apply {
-                moveTo(from.x.toFloat(), from.y.toFloat())
+                moveTo(fx + 1f, fy)
                 lineTo(to.x.toFloat(), to.y.toFloat())
             },
-            0, DRAG_MS, false,
+            0, moveMs, false,
         )
         // If the caller is cancelled while the hold is in flight, the injected pointer
-        // must be released — otherwise the divider stays "grabbed" by a phantom finger.
+        // must be released — otherwise the target stays "grabbed" by a phantom finger.
+        val holdDispatchedAt = android.os.SystemClock.uptimeMillis()
         if (!dispatchStroke(holdStroke, releaseOnCancelAt = from)) return false
+        // A willContinue stroke's onCompleted means "accepted/queued", NOT "played" —
+        // it arrives ~4ms after dispatch (measured). Dispatching the continuation that
+        // early collapses the hold, so long-press pickup never happens: wait out the
+        // hold duration first. This is a gesture playback parameter, not a state wait.
+        val elapsed = android.os.SystemClock.uptimeMillis() - holdDispatchedAt
+        if (elapsed < holdMs) kotlinx.coroutines.delay(holdMs - elapsed)
         return dispatchStroke(dragStroke)
     }
 
-    suspend fun doubleTap(at: Point): Boolean {
-        val tap = {
-            GestureDescription.StrokeDescription(
-                Path().apply { moveTo(at.x.toFloat(), at.y.toFloat()) }, 0, TAP_MS, false,
-            )
-        }
-        if (!dispatchStroke(tap())) return false
-        delay(TAP_GAP_MS)
-        return dispatchStroke(tap())
+    /** Fire-and-forget tap at a screen coordinate; true = the gesture was accepted. */
+    fun tapPoint(x: Int, y: Int): Boolean {
+        val path = Path().apply { moveTo(x.toFloat(), y.toFloat()) }
+        val gesture = GestureDescription.Builder()
+            .addStroke(GestureDescription.StrokeDescription(path, 0, TAP_MS, false))
+            .build()
+        return runCatching { dispatchGesture(gesture, null, null) }.getOrDefault(false)
     }
 
     private suspend fun dispatchStroke(
@@ -296,7 +309,6 @@ class DividerAccessibilityService : AccessibilityService() {
         private const val DRAG_MS = 350L
         private const val GESTURE_TIMEOUT_MS = 3_000L
         private const val TAP_MS = 60L
-        private const val TAP_GAP_MS = 90L
 
         fun isEnabled(context: Context): Boolean {
             val enabled = android.provider.Settings.Secure.getString(

@@ -4,10 +4,11 @@ import kotlin.math.abs
 import kotlin.math.roundToInt
 
 /** HORIZONTAL: the divider line is horizontal → panes stacked top/bottom.
- *  VERTICAL: the divider line is vertical → panes side by side. */
+ *  VERTICAL: the divider line is vertical → panes side by side.
+ *  Only HORIZONTAL is plannable — a VERTICAL divider is rotated before planning. */
 enum class SplitAxis { HORIZONTAL, VERTICAL }
 
-/** FIRST = top (HORIZONTAL axis) or left (VERTICAL axis). */
+/** FIRST = top pane, SECOND = bottom pane. */
 enum class PaneSide { FIRST, SECOND }
 
 enum class PositionPref { AUTO, FIRST, SECOND }
@@ -38,21 +39,16 @@ data class AspectRatio(val w: Int, val h: Int) {
     }
 }
 
+/** Plan for a top/bottom split: the video pane spans the full display width, so its
+ *  height alone decides the aspect ratio — the one layout with zero letterbox. */
 data class SplitPlan(
-    val axis: SplitAxis,
     val videoSide: PaneSide,
-    /** Desired length of the video pane along the split axis, px. */
+    /** Desired video pane height, px. */
     val videoPaneLengthPx: Int,
-    /** Desired divider center coordinate along the split axis, px in display coords. */
+    /** Desired divider center Y, px in display coords. */
     val dividerCenterPx: Int,
     /** True when the video pane hits the target ratio exactly (zero letterbox). */
     val exactRatio: Boolean,
-    /** VERTICAL-axis fallback: exact wide ratios are impossible, spacer only covers the camera hole. */
-    val holeAvoidMode: Boolean,
-    /** True when splitting would provide zero benefit (e.g. hole-avoid with no cutout): skip engagement. */
-    val noOp: Boolean = false,
-    /** The user explicitly placed the video on the hole side: minimal spacer, coverage not enforced. */
-    val holeExposedByChoice: Boolean = false,
 )
 
 object RatioMath {
@@ -60,14 +56,11 @@ object RatioMath {
     /** Panes can't shrink below roughly this fraction of the axis on One UI / AOSP. */
     const val MIN_PANE_FRACTION = 0.10f
 
-    /** Extra margin past the camera hole in hole-avoid mode, px. */
-    const val HOLE_MARGIN_PX = 12
-
     /** Achieved-vs-target tolerance when verifying a drag result. */
     const val RATIO_TOLERANCE = 0.02f
 
+    /** Top/bottom split: video fills the pane width; pane height = width / ratio. */
     fun plan(
-        axis: SplitAxis,
         displayWidth: Int,
         displayHeight: Int,
         dividerThicknessPx: Int,
@@ -75,60 +68,26 @@ object RatioMath {
         cutouts: List<Box>,
         positionPref: PositionPref,
     ): SplitPlan {
-        val axisLength = if (axis == SplitAxis.HORIZONTAL) displayHeight else displayWidth
-        val crossLength = if (axis == SplitAxis.HORIZONTAL) displayWidth else displayHeight
-        val usable = (axisLength - dividerThicknessPx).coerceAtLeast(1)
-        val minPane = (axisLength * MIN_PANE_FRACTION).roundToInt()
+        val usable = (displayHeight - dividerThicknessPx).coerceAtLeast(1)
+        val minPane = (displayHeight * MIN_PANE_FRACTION).roundToInt()
+        val videoSide = resolveVideoSide(displayHeight, cutouts, positionPref)
 
-        val videoSide = resolveVideoSide(axis, axisLength, cutouts, positionPref)
-
-        val paneLen: Int
-        val exact: Boolean
-        val holeAvoid: Boolean
-        var holeExposed = false
-        when (axis) {
-            SplitAxis.HORIZONTAL -> {
-                // Video fills the pane width; pane height = width / ratio → zero letterbox.
-                val ideal = (crossLength / target.value).roundToInt()
-                paneLen = ideal.coerceIn(minPane, (usable - minPane).coerceAtLeast(minPane))
-                exact = paneLen == ideal
-                holeAvoid = false
-            }
-            SplitAxis.VERTICAL -> {
-                // A near-square screen can't reach wide ratios by shrinking pane width.
-                // Fall back: the spacer covers just the camera-hole strip on its side.
-                val hole = union(cutouts)
-                    ?: // Nothing to avoid — splitting would only steal screen. Never interfere.
-                    return SplitPlan(axis, videoSide, usable, axisLength, exactRatio = false, holeAvoidMode = true, noOp = true)
-                val spacerSide = videoSide.opposite()
-                val holeSide = if (hole.centerX < axisLength / 2) PaneSide.FIRST else PaneSide.SECOND
-                val spacerLen = if (holeSide == spacerSide) {
-                    spacerLengthForHole(axis, axisLength, spacerSide, cutouts).coerceAtLeast(minPane)
-                } else {
-                    // Only reachable with a manual position pref: the user chose the hole
-                    // side for the video. Minimal spacer; the hole stays exposed by choice —
-                    // never plan an impossible "cover the hole from the far edge" spacer.
-                    holeExposed = true
-                    minPane
-                }
-                paneLen = (usable - spacerLen).coerceIn(minPane, (usable - minPane).coerceAtLeast(minPane))
-                exact = false
-                holeAvoid = true
-            }
-        }
+        val ideal = (displayWidth / target.value).roundToInt()
+        val paneLen = ideal.coerceIn(minPane, (usable - minPane).coerceAtLeast(minPane))
 
         val dividerCenter = if (videoSide == PaneSide.FIRST) {
             paneLen + dividerThicknessPx / 2
         } else {
-            axisLength - paneLen - dividerThicknessPx / 2
+            displayHeight - paneLen - dividerThicknessPx / 2
         }
-        return SplitPlan(axis, videoSide, paneLen, dividerCenter, exact, holeAvoid, holeExposedByChoice = holeExposed)
+        return SplitPlan(videoSide, paneLen, dividerCenter, exactRatio = paneLen == ideal)
     }
 
-    /** AUTO: put the video in the pane the camera hole is NOT in. */
+    /** AUTO: put the video in the pane the camera hole is NOT in. Without cutout data
+     *  (One UI hides it from third parties) default to the bottom pane — every current
+     *  fold's inner camera sits along the top edge. */
     fun resolveVideoSide(
-        axis: SplitAxis,
-        axisLength: Int,
+        displayHeight: Int,
         cutouts: List<Box>,
         pref: PositionPref,
     ): PaneSide = when (pref) {
@@ -136,33 +95,7 @@ object RatioMath {
         PositionPref.SECOND -> PaneSide.SECOND
         PositionPref.AUTO -> {
             val hole = union(cutouts) ?: return PaneSide.SECOND
-            val center = if (axis == SplitAxis.HORIZONTAL) hole.centerY else hole.centerX
-            if (center < axisLength / 2) PaneSide.SECOND else PaneSide.FIRST
-        }
-    }
-
-    /** Axis-aware spacer length: distance from the spacer-side display edge past the hole. */
-    fun spacerLengthForHole(
-        axis: SplitAxis,
-        axisLength: Int,
-        spacerSide: PaneSide,
-        cutouts: List<Box>,
-    ): Int {
-        val hole = union(cutouts) ?: return 0
-        val (lo, hi) = if (axis == SplitAxis.HORIZONTAL) hole.top to hole.bottom else hole.left to hole.right
-        return when (spacerSide) {
-            PaneSide.FIRST -> (hi + HOLE_MARGIN_PX).coerceAtLeast(0)
-            PaneSide.SECOND -> (axisLength - lo + HOLE_MARGIN_PX).coerceAtLeast(0)
-        }
-    }
-
-    /** Verifies the measured spacer pane actually covers the camera hole along the split axis. */
-    fun holeCovered(spacer: Box, cutouts: List<Box>, axis: SplitAxis): Boolean {
-        val hole = union(cutouts) ?: return true
-        return if (axis == SplitAxis.VERTICAL) {
-            hole.left >= spacer.left && hole.right <= spacer.right
-        } else {
-            hole.top >= spacer.top && hole.bottom <= spacer.bottom
+            if (hole.centerY < displayHeight / 2) PaneSide.SECOND else PaneSide.FIRST
         }
     }
 

@@ -15,9 +15,7 @@ fun failReasonText(reason: FailReason): String = stringResource(
         FailReason.NOT_INNER_DISPLAY -> R.string.fail_not_inner
         FailReason.FLEX_MODE -> R.string.fail_flex
         FailReason.RATIO_OFF -> R.string.fail_ratio_off
-        FailReason.HOLE_UNCOVERED -> R.string.fail_hole
         FailReason.SPLIT_UNAVAILABLE -> R.string.fail_split_unavailable
-        FailReason.SPLIT_TIMEOUT, FailReason.DIVIDER_LOST, FailReason.ADJUST_FAILED ->
-            R.string.fail_split
+        FailReason.DIVIDER_LOST, FailReason.ADJUST_FAILED -> R.string.fail_split
     }
 )

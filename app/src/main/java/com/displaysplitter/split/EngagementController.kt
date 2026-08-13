@@ -1,7 +1,7 @@
 package com.displaysplitter.split
 
+import android.accessibilityservice.AccessibilityService
 import android.content.Context
-import android.content.Intent
 import android.graphics.Point
 import android.graphics.Rect
 import android.os.SystemClock
@@ -10,11 +10,9 @@ import com.displaysplitter.geometry.Box
 import com.displaysplitter.geometry.PaneSide
 import com.displaysplitter.geometry.PositionPref
 import com.displaysplitter.geometry.RatioMath
-import com.displaysplitter.geometry.SplitAxis
 import com.displaysplitter.geometry.SplitPlan
 import com.displaysplitter.geometry.opposite
 import com.displaysplitter.settings.SettingsRepository
-import com.displaysplitter.spacer.SpacerActivity
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -26,7 +24,6 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.coroutines.coroutineContext
 
 sealed interface EngageState {
@@ -44,7 +41,7 @@ sealed interface EngageState {
 
 enum class FailReason {
     NO_SERVICE, NO_TARGET_APP, NOT_INNER_DISPLAY, FLEX_MODE, RATIO_OFF,
-    SPLIT_TIMEOUT, SPLIT_UNAVAILABLE, DIVIDER_LOST, HOLE_UNCOVERED, ADJUST_FAILED,
+    SPLIT_UNAVAILABLE, DIVIDER_LOST, ADJUST_FAILED,
 }
 
 enum class Posture { FLAT, HALF_OPENED, UNKNOWN }
@@ -52,6 +49,9 @@ enum class Posture { FLAT, HALF_OPENED, UNKNOWN }
 /**
  * Single source of truth for the split engagement lifecycle.
  * All mutation happens on the main dispatcher via [scope].
+ *
+ * Engagement starts ONLY from the user's explicit Apply (or the opt-in re-apply after
+ * unfolding of a split the user had applied) — never automatically on app launch.
  *
  * The spacer window observes [state]: any Idle/Failed transition makes it finish
  * itself, so every failure/reset path converges on the same teardown.
@@ -80,18 +80,20 @@ class EngagementController(
     private val _visiblePackages = MutableStateFlow<Set<String>>(emptySet())
 
     /** The bubble shows only when an enabled video app is visible, on the inner display,
-     *  outside Flex mode. "Visible" covers a video app occupying one split pane. */
+     *  outside Flex mode. It is force-hidden while Engaging: the entry recipe drives the
+     *  Recents UI with gesture taps, which take the finger's hit-test path — our own
+     *  touchable overlay would swallow them (SplitEntryDriver). */
     val bubbleVisible: StateFlow<Boolean> = combine(
         settings.state, _visiblePackages, _state, _posture,
         combine(_serviceConnected, _onInnerDisplay) { c, i -> c && i },
     ) { s, visible, st, posture, ready ->
         s.bubbleEnabled && ready && posture != Posture.HALF_OPENED &&
-            (visible.any { it in s.enabledApps } ||
-                st is EngageState.Engaged || st is EngageState.Engaging)
+            st !is EngageState.Engaging &&
+            (visible.any { it in s.enabledApps } || st is EngageState.Engaged)
     }.stateIn(scope, SharingStarted.Eagerly, false)
 
     private var engageJob: Job? = null
-    private var autoEngageJob: Job? = null
+    private var reengageJob: Job? = null
     private var disengageGraceJob: Job? = null
     private var boundsJob: Job? = null
 
@@ -111,14 +113,14 @@ class EngagementController(
         _posture.value = posture
         if (posture == Posture.HALF_OPENED) {
             // Flex mode: never interfere. Abort any in-flight automation immediately.
-            autoEngageJob?.cancel()
+            reengageJob?.cancel()
             engageJob?.cancel()
             if (_state.value is EngageState.Engaging) resetToIdle()
         } else if (posture == Posture.FLAT && previous != Posture.FLAT) {
             // Physically unfolding passes through HALF_OPENED, which suppresses (or
-            // cancels) auto-engagement — re-evaluate now that the device is flat,
+            // cancels) the re-engage — re-evaluate now that the device is flat,
             // regardless of which event (posture vs. foreground app) arrived last.
-            _foregroundPackage.value?.let { maybeAutoEngage(it) }
+            _foregroundPackage.value?.let { maybeReengage(it) }
         }
     }
 
@@ -171,11 +173,11 @@ class EngagementController(
 
             is EngageState.Idle, is EngageState.Failed -> {
                 if (isVideo) {
-                    maybeAutoEngage(pkg)
+                    maybeReengage(pkg)
                 } else if (pkg != SYSTEM_UI) {
                     // Transient system-UI windows (shade, recents peek) are neutral:
-                    // they must not cancel a pending auto-engage.
-                    autoEngageJob?.cancel()
+                    // they must not cancel a pending re-engage.
+                    reengageJob?.cancel()
                 }
             }
 
@@ -183,19 +185,21 @@ class EngagementController(
         }
     }
 
-    /** Schedules a debounced auto-engage if settings and device state allow it right now. */
-    private fun maybeAutoEngage(pkg: String) {
+    /** Schedules the debounced re-apply after unfolding — the ONLY non-explicit trigger,
+     *  and it only restores a split the user had applied before folding (opt-in setting). */
+    private fun maybeReengage(pkg: String) {
         if (_state.value !is EngageState.Idle && _state.value !is EngageState.Failed) return
         val s = settings.state.value
         val reengageValid = pkg == reengagePackage &&
             SystemClock.elapsedRealtime() - reengageAtMs < REENGAGE_WINDOW_MS
-        val shouldAuto = pkg in s.enabledApps && _onInnerDisplay.value &&
-            _posture.value != Posture.HALF_OPENED &&
-            (s.autoEngage || (s.autoReengage && reengageValid))
-        if (!shouldAuto) return
-        autoEngageJob?.cancel()
-        autoEngageJob = scope.launch {
-            delay(AUTO_ENGAGE_DEBOUNCE_MS)
+        if (!(s.autoReengage && reengageValid && pkg in s.enabledApps &&
+                _onInnerDisplay.value && _posture.value != Posture.HALF_OPENED)
+        ) {
+            return
+        }
+        reengageJob?.cancel()
+        reengageJob = scope.launch {
+            delay(REENGAGE_DEBOUNCE_MS)
             reengagePackage = null
             engage()
         }
@@ -234,6 +238,7 @@ class EngagementController(
 
     fun engage() {
         if (engageJob?.isActive == true) return
+        android.util.Log.i(TAG, "engage() requested (state=${_state.value})")
         engageJob = scope.launch { engageInternal() }
     }
 
@@ -251,9 +256,7 @@ class EngagementController(
         engageJob = scope.launch {
             val newSide = st.plan.videoSide.opposite()
             val newPref = if (newSide == PaneSide.FIRST) PositionPref.FIRST else PositionPref.SECOND
-            // Hole-avoid planning ignores the ratio; exact mode needs a real one.
-            val ratio = settings.state.value.ratio
-                ?: if (st.plan.holeAvoidMode) AspectRatio.R16_9 else return@launch
+            val ratio = settings.state.value.ratio ?: return@launch
             // The fresh pref is passed directly — never round-tripped through the
             // DataStore StateFlow, whose propagation is not ordered with this coroutine.
             adjustToPlan(service, st.packageName, ratio, retriesLeft = 1, positionPrefOverride = newPref)
@@ -282,29 +285,63 @@ class EngagementController(
 
         _state.value = EngageState.Engaging(pkg)
 
-        // 1. Ensure a split containing our spacer exists.
-        //    PRIMARY: FLAG_ACTIVITY_LAUNCH_ADJACENT initiates split from a fullscreen
-        //    source on Android 12L+ (Samsung One UI 11+). GLOBAL_ACTION_TOGGLE_SPLIT_SCREEN
-        //    was *removed* from the framework in Android 13, so it is only a legacy
-        //    fallback for API <= 32, feature-detected — never called blind.
-        val snap = service.panes(pkg)
-        if (snap?.divider == null || snap.spacer == null) {
-            var ready = attemptSplit(service, pkg)
-            if (ready != true && service.tryLegacyToggle()) {
-                delay(TOGGLE_SETTLE_MS)
-                ready = attemptSplit(service, pkg)
+        // 1. Ensure a split containing the video and our spacer exists. Recents-UI
+        //    automation (SplitEntryDriver) is the only initiation that works on
+        //    One UI 8+ — TOGGLE_SPLIT_SCREEN was removed from the framework and
+        //    LAUNCH_ADJACENT is ignored for background callers (verified on device).
+        //    Settled read: One UI's embedded divider window flickers out of the a11y
+        //    windows list, and a single missed read here would re-run the whole entry
+        //    over a perfectly good split.
+        var snap = settledPanes(service, pkg)
+        if (snap?.divider == null || snap.spacer == null || snap.video == null) {
+            // Drop the video's card on the edge of the pane it should END UP in, so
+            // the common case needs no pane swap afterwards.
+            val display = service.displayBounds()
+            val cutouts = service.displayCutoutRects()
+                .map { Box(it.left, it.top, it.right, it.bottom) }
+            val videoOnTop = RatioMath.resolveVideoSide(
+                display.height(), cutouts, s.positionPref,
+            ) == PaneSide.FIRST
+            val entered = SplitEntryDriver(service).enterSplit(pkg, videoOnTop)
+            if (abortRequested(service)) return
+            if (!entered) {
+                // Don't strand the user in Recents/split-select: back out once.
+                runCatching { service.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK) }
+                return fail(FailReason.SPLIT_UNAVAILABLE)
             }
-            if (ready != true) return fail(FailReason.SPLIT_UNAVAILABLE)
+            // The entry verified the pane PAIR, but the divider window lags the commit
+            // animation — give it a real settle budget before declaring it lost.
+            val deadline = SystemClock.uptimeMillis() + POST_ENTRY_SETTLE_MS
+            snap = service.panes(pkg)
+            while (snap?.divider == null && SystemClock.uptimeMillis() < deadline) {
+                delay(POLL_MS)
+                snap = service.panes(pkg)
+            }
+            android.util.Log.i(
+                TAG,
+                "post-entry snap: divider=${snap?.divider} spacer=${snap?.spacer} video=${snap?.video}",
+            )
         }
 
-        // 2. Plan from *measured* geometry — never assume the split axis.
+        // 2. Planning needs a horizontal divider (top/bottom panes — the only layout
+        //    where the full-width video pane can hit the exact ratio). A left/right
+        //    split (manual entry) is rotated once via the divider popup.
+        val divider = snap?.divider ?: return fail(FailReason.DIVIDER_LOST)
+        if (divider.width() < divider.height()) {
+            val rotated = SplitEntryDriver(service).rotateToTopBottom(ROTATE_TIMEOUT_MS) {
+                service.panes(pkg)?.divider?.let { it.width() >= it.height() } == true
+            }
+            if (abortRequested(service)) return
+            if (!rotated) return fail(FailReason.ADJUST_FAILED)
+        }
+
+        // 3. Plan from *measured* geometry and drive the divider.
         adjustToPlan(service, pkg, ratio, retriesLeft = 1)
     }
 
     /**
      * Measure, plan, swap panes if needed (verified), drag the divider (with error
-     * compensation on retry), and verify the outcome — ratio in exact mode, hole
-     * coverage and side in hole-avoid mode.
+     * compensation on retry), and verify the achieved ratio honestly.
      */
     private suspend fun adjustToPlan(
         service: DividerAccessibilityService,
@@ -319,14 +356,11 @@ class EngagementController(
         val display = settled.display
         if (abortRequested(service)) return
 
-        val axis = if (divider.width() >= divider.height()) SplitAxis.HORIZONTAL else SplitAxis.VERTICAL
         // Prefer the measured inter-pane gap over the divider window bounds: some
         // builds report the divider window inflated by its touch-target extension.
-        val windowThickness = if (axis == SplitAxis.HORIZONTAL) divider.height() else divider.width()
-        val thickness = measuredGap(settled.video, settled.spacer, axis) ?: windowThickness
+        val thickness = measuredGap(settled.video, settled.spacer) ?: divider.height()
         val cutouts = service.displayCutoutRects().map { Box(it.left, it.top, it.right, it.bottom) }
         var plan = RatioMath.plan(
-            axis = axis,
             displayWidth = display.width(),
             displayHeight = display.height(),
             dividerThicknessPx = thickness,
@@ -334,64 +368,58 @@ class EngagementController(
             cutouts = cutouts,
             positionPref = positionPrefOverride ?: settings.state.value.positionPref,
         )
-        if (plan.noOp) {
-            // Nothing to avoid on this axis — splitting would be pure interference.
-            _state.value = EngageState.Idle
-            return
-        }
 
-        // 3. Put the video pane on the planned side (double-tap on the divider swaps
-        //    panes). Verify the swap actually happened; retry once if it was swallowed.
+        // Put the video pane on the planned side. The only swap that works on One UI 8+
+        // is the divider-handle popup's "Switch windows" item (a bare double-tap merely
+        // opens and mis-taps that popup — measured). Verify the swap actually happened;
+        // retry once if it was swallowed.
         var current: PaneSnapshot = settled
-        if (current.video != null && sideOf(current.video!!, divider, axis) != plan.videoSide) {
+        if (current.video != null && sideOf(current.video!!, divider) != plan.videoSide) {
+            val driver = SplitEntryDriver(service)
             var attempts = 2
             while (attempts-- > 0) {
-                val d = current.divider ?: break
-                service.doubleTap(Point(d.centerX(), d.centerY()))
+                driver.swapPanes(SWAP_POPUP_TIMEOUT_MS) {
+                    service.panes(pkg)?.let { s2 ->
+                        val v2 = s2.video
+                        val d2 = s2.divider
+                        v2 != null && d2 != null && sideOf(v2, d2) == plan.videoSide
+                    } == true
+                }
                 delay(SWAP_SETTLE_MS)
                 if (abortRequested(service)) return
                 current = settledPanes(service, pkg) ?: return fail(FailReason.DIVIDER_LOST)
                 val v = current.video
                 val dd = current.divider
-                if (v != null && dd != null && sideOf(v, dd, axis) == plan.videoSide) break
+                if (v != null && dd != null && sideOf(v, dd) == plan.videoSide) break
             }
-            // Swap unsupported on this build (plain AOSP dividers have no double-tap
-            // swap): re-plan honestly for the side the video actually occupies instead
-            // of dragging the wrong pane to the planned length.
+            // Swap unavailable (popup item missing on this build): re-plan honestly for
+            // the side the video actually occupies instead of dragging the wrong pane
+            // to the planned length.
             val v = current.video
             val dd = current.divider
-            if (v != null && dd != null && sideOf(v, dd, axis) != plan.videoSide) {
+            if (v != null && dd != null && sideOf(v, dd) != plan.videoSide) {
                 val actualPref =
-                    if (sideOf(v, dd, axis) == PaneSide.FIRST) PositionPref.FIRST else PositionPref.SECOND
+                    if (sideOf(v, dd) == PaneSide.FIRST) PositionPref.FIRST else PositionPref.SECOND
                 plan = RatioMath.plan(
-                    axis, display.width(), display.height(), thickness, ratio, cutouts, actualPref,
+                    display.width(), display.height(), thickness, ratio, cutouts, actualPref,
                 )
-                if (plan.noOp) {
-                    _state.value = EngageState.Idle
-                    return
-                }
             }
         }
 
-        // 4. Drag the divider to the planned position (adjusted by any measured
-        //    snap error from a previous attempt so retries converge). Never drag
-        //    from a stale rect: if the divider vanished, the split may be gone and
-        //    the gesture would land inside the video app.
+        // Drag the divider to the planned position (adjusted by any measured snap
+        // error from a previous attempt so retries converge). Never drag from a
+        // stale rect: if the divider vanished, the split may be gone and the
+        // gesture would land inside the video app.
         val fresh = current.divider
             ?: settledPanes(service, pkg)?.divider
             ?: return fail(FailReason.DIVIDER_LOST)
         val from = Point(fresh.centerX(), fresh.centerY())
-        val targetCenter = plan.dividerCenterPx + compensationPx
-        val to = if (axis == SplitAxis.HORIZONTAL) {
-            Point(fresh.centerX(), targetCenter)
-        } else {
-            Point(targetCenter, fresh.centerY())
-        }
+        val to = Point(fresh.centerX(), plan.dividerCenterPx + compensationPx)
         val dragged = service.dragDivider(from, to)
         delay(DRAG_SETTLE_MS)
         if (abortRequested(service)) return
 
-        // 5. Verify against what the system actually gave us (snap points may differ).
+        // Verify against what the system actually gave us (snap points may differ).
         val result = service.panes(pkg)
         val videoPane = result?.video
         if (videoPane == null || !dragged) {
@@ -401,9 +429,9 @@ class EngagementController(
             return fail(FailReason.ADJUST_FAILED)
         }
 
-        // The video must sit on the planned side in every mode — a converged-but-
-        // wrong-side result would defeat the hole avoidance silently.
-        val sideOk = result.divider == null || sideOf(videoPane, result.divider, axis) == plan.videoSide
+        // The video must sit on the planned side — a converged-but-wrong-side result
+        // would put the video under the camera hole silently.
+        val sideOk = result.divider == null || sideOf(videoPane, result.divider) == plan.videoSide
         if (!sideOk) {
             if (retriesLeft > 0) {
                 return adjustToPlan(service, pkg, ratio, retriesLeft - 1, compensationPx, positionPrefOverride)
@@ -411,25 +439,11 @@ class EngagementController(
             return fail(FailReason.ADJUST_FAILED)
         }
 
-        if (plan.holeAvoidMode && !plan.holeExposedByChoice) {
-            // The whole point of this mode: the spacer must actually cover the hole.
-            val spacer = result.spacer
-            val covered = spacer != null &&
-                RatioMath.holeCovered(Box(spacer.left, spacer.top, spacer.right, spacer.bottom), cutouts, axis)
-            if (!covered) {
-                if (retriesLeft > 0) {
-                    return adjustToPlan(service, pkg, ratio, retriesLeft - 1, compensationPx, positionPrefOverride)
-                }
-                return fail(FailReason.HOLE_UNCOVERED)
-            }
-        }
-
         val achieved = RatioMath.achievedRatio(videoPane.width(), videoPane.height())
         if (plan.exactRatio && !RatioMath.isWithinTolerance(achieved, ratio)) {
             if (retriesLeft > 0) {
                 // Compensate the systematic snap error instead of replaying the same drag.
-                val measuredLen = if (axis == SplitAxis.HORIZONTAL) videoPane.height() else videoPane.width()
-                val err = measuredLen - plan.videoPaneLengthPx
+                val err = videoPane.height() - plan.videoPaneLengthPx
                 val delta = if (plan.videoSide == PaneSide.FIRST) -err else err
                 return adjustToPlan(service, pkg, ratio, retriesLeft - 1, compensationPx + delta, positionPrefOverride)
             }
@@ -440,43 +454,6 @@ class EngagementController(
         }
         coroutineContext.ensureActive()
         _state.value = EngageState.Engaged(pkg, plan, achieved, videoPane)
-    }
-
-    /**
-     * Launch the spacer into the adjacent pane and wait for the split (divider + our
-     * spacer) to materialize. On a fullscreen source this *initiates* the split.
-     * Returns true on success, false/null on timeout.
-     */
-    private suspend fun attemptSplit(service: DividerAccessibilityService, pkg: String): Boolean? {
-        launchSpacerAdjacent()
-        return withTimeoutOrNull(SPLIT_TIMEOUT_MS) {
-            var elapsed = 0L
-            var relaunched = false
-            while (true) {
-                if (abortRequested(service)) return@withTimeoutOrNull false
-                val snap = service.panes(pkg)
-                // Success requires the VIDEO to still be present: launching adjacent into
-                // a pre-existing foreign split can evict the video pane, and a split
-                // without the video is not a success — never claim it.
-                if (snap?.divider != null && snap.spacer != null && snap.video != null) break
-                if (snap?.video == null && snap?.spacer != null) {
-                    // The video was evicted (foreign-split replacement went the wrong way).
-                    return@withTimeoutOrNull false
-                }
-                delay(POLL_MS)
-                elapsed += POLL_MS
-                // One mid-wait relaunch covers the race where LAUNCH_ADJACENT fired before
-                // the shell was ready. Re-check spacer/divider *immediately before* the
-                // relaunch — MULTIPLE_TASK would otherwise spawn a duplicate spacer task
-                // whenever the first spacer lands after this check but before the launch.
-                if (!relaunched && elapsed >= RELAUNCH_AFTER_MS) {
-                    relaunched = true
-                    val now = service.panes(pkg)
-                    if (now?.spacer == null && now?.divider == null) launchSpacerAdjacent()
-                }
-            }
-            true
-        }
     }
 
     /** Polls briefly for a snapshot whose divider is present — the divider window can
@@ -493,26 +470,20 @@ class EngagementController(
 
     // ---- helpers -----------------------------------------------------------------------------
 
-    /** Environment changed under an in-flight adjustment: stop touching the divider. */
+    /** Environment changed under an in-flight engagement: stop touching the screen. */
     private fun abortRequested(service: DividerAccessibilityService): Boolean =
         DividerAccessibilityService.instance !== service ||
             !service.isOnInnerDisplay() ||
             _posture.value == Posture.HALF_OPENED
 
-    private fun sideOf(pane: Rect, divider: Rect, axis: SplitAxis): PaneSide {
-        val paneCenter = if (axis == SplitAxis.HORIZONTAL) pane.centerY() else pane.centerX()
-        val dividerCenter = if (axis == SplitAxis.HORIZONTAL) divider.centerY() else divider.centerX()
-        return if (paneCenter < dividerCenter) PaneSide.FIRST else PaneSide.SECOND
-    }
+    /** FIRST = top pane. Horizontal divider only — engageInternal rotates before planning. */
+    private fun sideOf(pane: Rect, divider: Rect): PaneSide =
+        if (pane.centerY() < divider.centerY()) PaneSide.FIRST else PaneSide.SECOND
 
     /** Effective inter-pane gap measured from the panes themselves, when available. */
-    private fun measuredGap(video: Rect?, spacer: Rect?, axis: SplitAxis): Int? {
+    private fun measuredGap(video: Rect?, spacer: Rect?): Int? {
         if (video == null || spacer == null) return null
-        val gap = if (axis == SplitAxis.HORIZONTAL) {
-            maxOf(video.top, spacer.top) - minOf(video.bottom, spacer.bottom)
-        } else {
-            maxOf(video.left, spacer.left) - minOf(video.right, spacer.right)
-        }
+        val gap = maxOf(video.top, spacer.top) - minOf(video.bottom, spacer.bottom)
         return gap.takeIf { it > 0 }
     }
 
@@ -522,44 +493,35 @@ class EngagementController(
         reengageAtMs = SystemClock.elapsedRealtime()
     }
 
-    private fun launchSpacerAdjacent() {
-        // NEW_TASK is mandatory for LAUNCH_ADJACENT; the pair initiates split from a
-        // fullscreen source (Android 12L+). The launch is BAL-permitted because our
-        // overlay bubble is a visible window whenever engagement can be triggered.
-        context.startActivity(
-            Intent(context, SpacerActivity::class.java).addFlags(
-                Intent.FLAG_ACTIVITY_NEW_TASK or
-                    Intent.FLAG_ACTIVITY_LAUNCH_ADJACENT or
-                    Intent.FLAG_ACTIVITY_MULTIPLE_TASK
-            )
-        )
-    }
-
     private fun fail(reason: FailReason) {
+        android.util.Log.w(TAG, "engagement failed: $reason")
         // Failed is observed by the spacer window, which finishes itself.
         _state.value = EngageState.Failed(reason)
     }
 
     private fun resetToIdle() {
         engageJob?.cancel()
-        autoEngageJob?.cancel()
+        reengageJob?.cancel()
         disengageGraceJob?.cancel()
         boundsJob?.cancel()
         _state.value = EngageState.Idle
     }
 
     private companion object {
+        const val TAG = "DisplaySplitter"
         const val SYSTEM_UI = "com.android.systemui"
-        const val TOGGLE_SETTLE_MS = 350L
         const val POLL_MS = 150L
-        const val RELAUNCH_AFTER_MS = 600L
-        const val SPLIT_TIMEOUT_MS = 5_000L
+        const val POST_ENTRY_SETTLE_MS = 3_000L
+        const val SWAP_POPUP_TIMEOUT_MS = 4_000L
+        const val ROTATE_TIMEOUT_MS = 5_000L
         const val SWAP_SETTLE_MS = 650L
         const val DRAG_SETTLE_MS = 600L
         const val BOUNDS_SETTLE_MS = 250L
-        const val AUTO_ENGAGE_DEBOUNCE_MS = 800L
+        const val REENGAGE_DEBOUNCE_MS = 800L
         const val DISENGAGE_GRACE_MS = 1_500L
         const val REENGAGE_WINDOW_MS = 60_000L
-        const val DIVIDER_SETTLE_POLLS = 3
+        // 1.5s worth of polls: the divider window leaves the a11y windows list for the
+        // whole duration of swap/commit animations, not just a frame (measured).
+        const val DIVIDER_SETTLE_POLLS = 10
     }
 }

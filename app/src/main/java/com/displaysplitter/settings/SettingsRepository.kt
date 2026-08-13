@@ -36,7 +36,6 @@ data class SettingsState(
     val positionPref: PositionPref,
     val bubbleEnabled: Boolean,
     val bubbleOpacity: Float,              // 0.2f..1f
-    val autoEngage: Boolean,
     val autoReengage: Boolean,
     val enabledApps: Set<String>,
     val bubbleX: Int,                      // saved bubble position, -1 = default
@@ -48,7 +47,6 @@ data class SettingsState(
             positionPref = PositionPref.AUTO,
             bubbleEnabled = true,
             bubbleOpacity = 0.85f,
-            autoEngage = false,
             autoReengage = true,
             enabledApps = setOf("com.google.android.youtube", "com.netflix.mediaclient"),
             bubbleX = -1,
@@ -65,7 +63,6 @@ class SettingsRepository(private val context: Context, scope: CoroutineScope) {
         val POSITION = stringPreferencesKey("position")
         val BUBBLE_ENABLED = booleanPreferencesKey("bubble_enabled")
         val BUBBLE_OPACITY = floatPreferencesKey("bubble_opacity")
-        val AUTO_ENGAGE = booleanPreferencesKey("auto_engage")
         val AUTO_REENGAGE = booleanPreferencesKey("auto_reengage")
         val ENABLED_APPS = stringSetPreferencesKey("enabled_apps")
         val BUBBLE_X = intPreferencesKey("bubble_x")
@@ -83,7 +80,6 @@ class SettingsRepository(private val context: Context, scope: CoroutineScope) {
                     .getOrDefault(d.positionPref),
                 bubbleEnabled = p[Keys.BUBBLE_ENABLED] ?: d.bubbleEnabled,
                 bubbleOpacity = (p[Keys.BUBBLE_OPACITY] ?: d.bubbleOpacity).coerceIn(0.2f, 1f),
-                autoEngage = p[Keys.AUTO_ENGAGE] ?: d.autoEngage,
                 autoReengage = p[Keys.AUTO_REENGAGE] ?: d.autoReengage,
                 enabledApps = p[Keys.ENABLED_APPS] ?: d.enabledApps,
                 bubbleX = p[Keys.BUBBLE_X] ?: d.bubbleX,
@@ -107,10 +103,6 @@ class SettingsRepository(private val context: Context, scope: CoroutineScope) {
 
     suspend fun setBubbleOpacity(opacity: Float) = context.dataStore.edit {
         it[Keys.BUBBLE_OPACITY] = opacity.coerceIn(0.2f, 1f)
-    }
-
-    suspend fun setAutoEngage(enabled: Boolean) = context.dataStore.edit {
-        it[Keys.AUTO_ENGAGE] = enabled
     }
 
     suspend fun setAutoReengage(enabled: Boolean) = context.dataStore.edit {

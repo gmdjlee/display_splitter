@@ -310,13 +310,6 @@ fun HomeScreen(
                 SectionHeader(stringResource(R.string.section_behavior))
                 SectionCard {
                     SwitchRow(
-                        title = stringResource(R.string.auto_engage),
-                        desc = stringResource(R.string.auto_engage_desc),
-                        checked = settingsState.autoEngage,
-                        onChecked = { scope.launch { settings.setAutoEngage(it) } },
-                    )
-                    RowDivider()
-                    SwitchRow(
                         title = stringResource(R.string.auto_reengage),
                         desc = stringResource(R.string.auto_reengage_desc),
                         checked = settingsState.autoReengage,
@@ -601,7 +594,6 @@ private fun StatusCard(
 ) {
     val colors = MaterialTheme.oneUi
     val engaged = engageState as? EngageState.Engaged
-    val axis = engaged?.plan?.axis ?: SplitAxis.HORIZONTAL
     // Full display bounds, not this window's metrics: the settings activity itself
     // can be running in a split or pop-up window on a Fold.
     val context = LocalContext.current
@@ -609,11 +601,8 @@ private fun StatusCard(
         context.getSystemService(WindowManager::class.java).maximumWindowMetrics.bounds
     }
     val videoFraction = when {
-        engaged != null -> {
-            val len = if (axis == SplitAxis.HORIZONTAL) engaged.videoPane.height() else engaged.videoPane.width()
-            val total = if (axis == SplitAxis.HORIZONTAL) display.height() else display.width()
-            if (total > 0) len.toFloat() / total else 0.62f
-        }
+        engaged != null ->
+            if (display.height() > 0) engaged.videoPane.height().toFloat() / display.height() else 0.62f
         ratio != null && display.height() > 0 -> (display.width() / ratio.value) / display.height()
         else -> 1f
     }
@@ -633,7 +622,6 @@ private fun StatusCard(
                 FoldDiagram(
                     engaged = engaged != null,
                     videoSide = engaged?.plan?.videoSide ?: PaneSide.SECOND,
-                    axis = axis,
                     videoFraction = videoFraction,
                     primary = colors.Primary,
                     outline = colors.TrackInactive,
@@ -682,16 +670,6 @@ private fun StatusCard(
                     }
                 }
             }
-            // Side-by-side split: explain the hole-avoid mechanism instead of showing
-            // a mismatched ratio with no context.
-            if (engaged?.plan?.holeAvoidMode == true) {
-                Text(
-                    stringResource(R.string.letterbox_note_vertical),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = colors.OnSurfaceVariant,
-                    modifier = Modifier.padding(start = 20.dp, end = 20.dp, bottom = 16.dp),
-                )
-            }
         }
     }
 }
@@ -700,7 +678,6 @@ private fun StatusCard(
 private fun FoldDiagram(
     engaged: Boolean,
     videoSide: PaneSide,
-    axis: SplitAxis,
     videoFraction: Float,
     primary: Color,
     outline: Color,
@@ -720,39 +697,21 @@ private fun FoldDiagram(
         if (engaged) {
             val frac = videoFraction.coerceIn(0.2f, 0.9f)
             val paneCorner = CornerRadius(7.dp.toPx())
-            if (axis == SplitAxis.HORIZONTAL) {
-                val videoH = inner.height * frac
-                val videoTop = if (videoSide == PaneSide.FIRST) origin.y else origin.y + inner.height - videoH
-                val spacerTop = if (videoSide == PaneSide.FIRST) origin.y + videoH else origin.y
-                drawRoundRect(
-                    color = spacerColor,
-                    topLeft = Offset(origin.x, spacerTop),
-                    size = Size(inner.width, inner.height - videoH),
-                    cornerRadius = paneCorner,
-                )
-                drawRoundRect(
-                    color = primary,
-                    topLeft = Offset(origin.x, videoTop),
-                    size = Size(inner.width, videoH),
-                    cornerRadius = paneCorner,
-                )
-            } else {
-                val videoW = inner.width * frac
-                val videoLeft = if (videoSide == PaneSide.FIRST) origin.x else origin.x + inner.width - videoW
-                val spacerLeft = if (videoSide == PaneSide.FIRST) origin.x + videoW else origin.x
-                drawRoundRect(
-                    color = spacerColor,
-                    topLeft = Offset(spacerLeft, origin.y),
-                    size = Size(inner.width - videoW, inner.height),
-                    cornerRadius = paneCorner,
-                )
-                drawRoundRect(
-                    color = primary,
-                    topLeft = Offset(videoLeft, origin.y),
-                    size = Size(videoW, inner.height),
-                    cornerRadius = paneCorner,
-                )
-            }
+            val videoH = inner.height * frac
+            val videoTop = if (videoSide == PaneSide.FIRST) origin.y else origin.y + inner.height - videoH
+            val spacerTop = if (videoSide == PaneSide.FIRST) origin.y + videoH else origin.y
+            drawRoundRect(
+                color = spacerColor,
+                topLeft = Offset(origin.x, spacerTop),
+                size = Size(inner.width, inner.height - videoH),
+                cornerRadius = paneCorner,
+            )
+            drawRoundRect(
+                color = primary,
+                topLeft = Offset(origin.x, videoTop),
+                size = Size(inner.width, videoH),
+                cornerRadius = paneCorner,
+            )
         } else {
             drawRoundRect(
                 color = primary.copy(alpha = 0.25f),

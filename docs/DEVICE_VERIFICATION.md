@@ -1,5 +1,56 @@
 # On-device verification — Galaxy Z Fold7 / Fold8
 
+## Results — 2026-08-13: FWA-ported Recents entry VERIFIED WORKING (SM-F966N, One UI 8.5)
+
+**Split initiation is solved.** The FoldWindow-style Recents automation was ported and
+verified end-to-end on device: Apply → top/bottom split with the black spacer → divider
+at the target ratio, in ~5s, repeatably.
+
+| Verified | Detail |
+|---|---|
+| DRAG recipe (resizeable apps, YouTube ×3 runs) | Recents → card-icon hold-drag to the TOP or BOTTOM edge (both drop zones work in portrait; the edge is chosen so the video lands on its planned side → no swap needed) → partner picker → spacer tapped |
+| MENU recipe (unresizeable apps, Netflix) | card icon → "분할 화면으로 열기" (L/R) → picker → divider handle → "시계 방향으로 회전" → T/B. `ResizeMode` privateFlags bit 1<<11 correctly classifies Netflix |
+| Picker discovery | Fresh install: picker search escalation (search button → SET_TEXT "DS 스페이서" → result tap). After first use the spacer shows up in the picker's recent/frequent sections and is tapped directly |
+| Pane swap (flip) | Divider-handle popup "창 전환" — a bare double-tap on the handle just opens/mis-taps that popup (measured); popup click is the only swap that works |
+| Divider drag to ratio | One UI snaps to a grid ~20px coarse: 16:9 target lands at 1.74:1 (1.9% off, within the 2% tolerance) — reported honestly in the UI |
+| Restore (전체 화면으로) | Spacer self-finishes → split dissolves → video app fullscreen |
+| Measured traps fixed this session | ① hold stroke needs 1px drift AND the continuation must wait out holdMs (queued-continuation collapses the hold); ② the spacer's cover-screen guard must use DISPLAY size, not its own pane-sized configuration (it was self-destructing on landing); ③ divider window leaves the a11y list for whole animation durations (1.5s settle polls); ④ picker search field's own text matches the label — exclude editable nodes |
+
+Still pending: physical checks below (fold/flex/0ms), plus the Netflix in-playback
+pop-up-player quirk (FoldWindow device facts) when engaging mid-playback.
+
+## Results — 2026-08-12, SM-F966N (Fold7), Android 16 / One UI 8.5 (ADB-driven)
+
+**Verdict: the divider-driving pipeline works on real One UI; split *initiation* and
+cutout *sourcing* are both blocked by One UI 8.5 and need product changes.**
+
+| Finding | Status |
+|---|---|
+| Tier-1 `FLAG_ACTIVITY_LAUNCH_ADJACENT` from a background context | ❌ Ignored — spacer opens **fullscreen** (`windowing-mode=1`), from fullscreen source AND into an existing split. BAL itself is fine (`BAL_ALLOW_NON_APP_VISIBLE_WINDOW`). App detects it and fails gracefully (`SPLIT_UNAVAILABLE`, guidance shown). |
+| Tier-2 legacy toggle | N/A (API 36, correctly feature-gated off) |
+| Tier-3 as documented (split with *any* app, then Apply) | ❌ Also fails — spacer replacement relies on the same LAUNCH_ADJACENT. **Working variant: pick *Display Splitter itself* as the second split app**, then Apply — `panes()` accepts our pane as the spacer and the pipeline runs. |
+| `TYPE_SPLIT_SCREEN_DIVIDER` detection (`Embedded{StageCoordinatorSplitDivider}`) | ✅ Works; divider **flickers out of the a11y windows list** transiently — first-check now uses `settledPanes` (fixed this session) |
+| Axis measurement | ✅ Vertical divider (side-by-side) — the ONLY split layout One UI offers on the near-square inner display, so **hole-avoid is the only reachable mode**; exact-ratio (horizontal divider) appears unreachable on this device |
+| Hole-avoid plan + `dispatchGesture` divider drag | ✅ Divider dragged x984→x1398; video pane [0,1391], spacer pane [1405,1968] fully covers the punch hole (x1450–1520); Engaged, honest 0.64:1 report |
+| Double-tap pane swap | ✅ Video moved FIRST→SECOND on pref change + re-Apply; divider then dragged to minPane (~10%), `holeExposedByChoice` honored |
+| Restore (전체 화면으로) | ✅ State returns to Idle (full collapse untestable in the bypass — the pane was MainActivity, which doesn't self-finish like SpacerActivity) |
+| Fail/guidance UX (`fail_split_unavailable`), status card, achieved-ratio display | ✅ |
+| **Display cutout sourcing** | ❌ One UI 8.5 hides the cutout from EVERY third-party API: service/window-context `WindowMetrics`, `Display.getCutout()`, overlay-window insets, and even **activity windows** (fullscreen + `LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS` still get `displayCutout=null` while the raw `InsetsState` in logcat clearly carries `Rect(1450,18–1520,88)`). `config_mainBuiltInDisplayCutout` resource is empty too. Verified this session with the value manually seeded into the app's cutout cache. |
+
+Session code changes: `App.trackCutout` + per-display-size cutout cache (currently
+unfillable on One UI 8.5 — see above), `settledPanes` on the engage first-check,
+`displayCutoutRects` fallback chain.
+
+**Open items**
+1. Split initiation: launch-adjacent is dead on One UI 8.5. Candidates: update tier-3
+   guidance to "pick Display Splitter as the second app"; have the in-pane MainActivity
+   launch SpacerActivity into its own task (same-task launch stays in the pane); research
+   Samsung app-pair APIs.
+2. Cutout source: seed a small per-model table (Fold7 inner 1968×2184 → 1450,18,1520,88)
+   or find a One UI-visible source; without it hole-avoid no-ops (graceful, but does nothing).
+3. Physical checks below (fold/flex/0ms) still require hands on the device.
+
+
 Everything except programmatic split **initiation** was verified on the Pixel 9 Pro Fold
 emulator (Android 16). Split initiation must be checked on a real Samsung device because
 the AOSP emulator refuses all programmatic adjacent-split entry (it only offers the manual

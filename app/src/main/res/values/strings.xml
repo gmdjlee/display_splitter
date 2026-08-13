@@ -16,9 +16,8 @@
     <string name="fail_not_inner">Only works on the inner screen.</string>
     <string name="fail_flex">Paused in Flex mode.</string>
     <string name="fail_ratio_off">Pick a target ratio first.</string>
-    <string name="fail_hole">Couldn\'t cover the camera hole. Try again.</string>
     <string name="fail_split">Split screen didn\'t respond. Try again.</string>
-    <string name="fail_split_unavailable">This device blocked automatic split screen. Start split screen from Recents, then tap Apply.</string>
+    <string name="fail_split_unavailable">Couldn\'t enter split screen automatically. Tap Apply to try again.</string>
 
     <string name="notif_channel_name">Floating control</string>
     <string name="notif_title">Display Splitter is running</string>
@@ -41,8 +40,8 @@
     <string name="section_position">Video position</string>
     <string name="position_auto">Auto</string>
     <string name="position_auto_desc">Opposite the camera hole</string>
-    <string name="position_first">Top / Left</string>
-    <string name="position_second">Bottom / Right</string>
+    <string name="position_first">Top</string>
+    <string name="position_second">Bottom</string>
 
     <string name="section_bubble">Floating bubble</string>
     <string name="bubble_show">Show floating bubble</string>
@@ -55,8 +54,6 @@
     <string name="section_behavior">Behavior</string>
     <string name="auto_reengage">Re-apply after unfolding</string>
     <string name="auto_reengage_desc">If the split was active when you closed the phone, apply it again on the inner screen.</string>
-    <string name="auto_engage">Apply automatically</string>
-    <string name="auto_engage_desc">Apply the split as soon as a video app opens, without tapping the bubble.</string>
 
     <string name="engage_now">Apply split</string>
     <string name="disengage">Restore full screen</string>
@@ -65,10 +62,12 @@
 
     <string name="spacer_exit">Restore full screen</string>
     <string name="spacer_flip">Flip video position</string>
+    <!-- Partner-picker label for the spacer pane. Must NOT be a substring of app_name
+         (and vice versa): the entry recipe matches picker nodes by contains(label). -->
+    <string name="spacer_label">DS Spacer</string>
 
     <string name="about_footer">Only the inner screen is adjusted. Flex mode and the cover screen are never touched. Subtitles and gestures stay with the video app and One UI.</string>
 
     <string name="bubble_content_desc">Display Splitter control</string>
     <string name="engaged_ratio_fmt">Video pane %1$s</string>
-    <string name="letterbox_note_vertical">Side-by-side split: exact wide ratios are not possible — the spacer covers the camera hole instead.</string>
 </resources>

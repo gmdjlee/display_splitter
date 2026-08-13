@@ -57,9 +57,7 @@ class SpacerActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         // Zero cover-screen footprint: if we are ever (re)created off the inner
         // display — process-death restore on the cover screen — vanish immediately.
-        if (resources.configuration.smallestScreenWidthDp <
-            DividerAccessibilityService.INNER_DISPLAY_MIN_SW_DP
-        ) {
+        if (onCoverDisplay()) {
             finishAndRemoveTask()
             return
         }
@@ -87,9 +85,10 @@ class SpacerActivity : ComponentActivity() {
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
         // Folding the device shut: the cover screen is none of our business. Vanish silently.
-        // We know foldedShut from newConfig directly — never from the service's possibly
-        // stale configuration.
-        if (newConfig.smallestScreenWidthDp < DividerAccessibilityService.INNER_DISPLAY_MIN_SW_DP) {
+        // Display-based check: this window is a SPLIT PANE, so its own configuration's
+        // smallestScreenWidthDp is pane-sized (<600dp on the inner display too) — using it
+        // here killed the spacer on every pane resize (measured).
+        if (onCoverDisplay()) {
             controller.onSpacerStopped(foldedShut = true)
             finishAndRemoveTask()
             return
@@ -116,12 +115,18 @@ class SpacerActivity : ComponentActivity() {
         // A pure configuration recreation (locale, font scale) must not tear down a
         // live engagement — the recreated instance re-binds to controller.state.
         if (!isChangingConfigurations) {
-            controller.onSpacerStopped(
-                foldedShut = resources.configuration.smallestScreenWidthDp <
-                    DividerAccessibilityService.INNER_DISPLAY_MIN_SW_DP
-            )
+            controller.onSpacerStopped(foldedShut = onCoverDisplay())
         }
         super.onDestroy()
+    }
+
+    /** Cover-screen detection from the DISPLAY size, never this window's configuration —
+     *  as a split pane this window is always narrower than 600dp, even on the inner display. */
+    private fun onCoverDisplay(): Boolean {
+        val display = getSystemService(android.view.WindowManager::class.java)
+            .maximumWindowMetrics.bounds
+        val smallestDp = minOf(display.width(), display.height()) / resources.displayMetrics.density
+        return smallestDp < DividerAccessibilityService.INNER_DISPLAY_MIN_SW_DP
     }
 
     private fun hideSystemBars() {
