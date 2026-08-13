@@ -17,7 +17,7 @@
     <string name="fail_flex">플렉스 모드에서는 일시 중지돼요.</string>
     <string name="fail_ratio_off">먼저 목표 화면비를 선택해 주세요.</string>
     <string name="fail_split">분할 화면이 응답하지 않았어요. 다시 시도해 주세요.</string>
-    <string name="fail_split_unavailable">분할 화면에 자동으로 들어가지 못했어요. 적용을 다시 눌러 주세요.</string>
+    <string name="fail_split_unavailable">분할 화면에 자동으로 들어가지 못했어요. 설정 &gt; 유용한 기능 &gt; 멀티윈도우에서 두 손가락 스와이프 제스처가 켜져 있는지 확인한 뒤 적용을 다시 눌러 주세요.</string>
 
     <string name="notif_channel_name">플로팅 컨트롤</string>
     <string name="notif_title">디스플레이 스플리터 실행 중</string>

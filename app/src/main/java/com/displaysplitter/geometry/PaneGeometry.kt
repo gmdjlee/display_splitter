@@ -1,7 +1,7 @@
 package com.displaysplitter.geometry
 
 /**
- * Screen/window geometry predicates for the split-entry recipes. Pure Kotlin —
+ * Screen/window geometry predicates for split entry. Pure Kotlin —
  * everything here is verifiable without a device.
  *
  * Ported from FoldWindow's device-verified PaneGeometry (Fold7 / One UI 8):
@@ -76,7 +76,7 @@ object PaneGeometry {
     }
 
     /**
-     * DRAG-recipe step 2 success: the target entered the TOP/BOTTOM split-select state.
+     * TOP/BOTTOM split-select state with the target docked at the top edge.
      * All three measured conditions are required — full width (≥90%), top-docked, and
      * visible height in 15–75% — to reject popup/freeform windows.
      */
@@ -88,7 +88,7 @@ object PaneGeometry {
         return fullWidthOk && topDockedOk && ratio in SPLIT_SELECT_MIN_RATIO..SPLIT_SELECT_MAX_RATIO
     }
 
-    /** The bottom-docked mirror of [isSplitSelectTopPane] (video-on-bottom entry). */
+    /** The bottom-docked mirror of [isSplitSelectTopPane]. */
     fun isSplitSelectBottomPane(pane: Box, screen: Box): Boolean {
         val visible = visibleRect(pane, screen) ?: return false
         val fullWidthOk = visible.width >= screen.width * FULL_AXIS_FRACTION
@@ -97,7 +97,7 @@ object PaneGeometry {
         return fullWidthOk && bottomDockedOk && ratio in SPLIT_SELECT_MIN_RATIO..SPLIT_SELECT_MAX_RATIO
     }
 
-    /** MENU-recipe step 3 success: the left/right split-select mirror of [isSplitSelectTopPane]. */
+    /** The left/right split-select mirror of [isSplitSelectTopPane]. */
     fun isSplitSelectSidePane(pane: Box, screen: Box): Boolean {
         val visible = visibleRect(pane, screen) ?: return false
         val fullHeightOk = visible.height >= screen.height * FULL_AXIS_FRACTION

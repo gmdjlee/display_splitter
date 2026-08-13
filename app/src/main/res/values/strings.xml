@@ -17,7 +17,7 @@
     <string name="fail_flex">Paused in Flex mode.</string>
     <string name="fail_ratio_off">Pick a target ratio first.</string>
     <string name="fail_split">Split screen didn\'t respond. Try again.</string>
-    <string name="fail_split_unavailable">Couldn\'t enter split screen automatically. Tap Apply to try again.</string>
+    <string name="fail_split_unavailable">Couldn\'t enter split screen automatically. Check that the two-finger swipe gesture is on in Settings &gt; Advanced features &gt; Multi window, then tap Apply again.</string>
 
     <string name="notif_channel_name">Floating control</string>
     <string name="notif_title">Display Splitter is running</string>

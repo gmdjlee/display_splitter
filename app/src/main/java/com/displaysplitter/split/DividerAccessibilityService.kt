@@ -186,7 +186,7 @@ class DividerAccessibilityService : AccessibilityService() {
      * silently ineffective for drag-and-drop pickup (far below touch slop, so it never
      * disturbs long-press recognition).
      */
-    suspend fun holdThenDrag(from: Point, to: Point, holdMs: Long, moveMs: Long): Boolean {
+    private suspend fun holdThenDrag(from: Point, to: Point, holdMs: Long, moveMs: Long): Boolean {
         val fx = from.x.toFloat()
         val fy = from.y.toFloat()
         val holdStroke = GestureDescription.StrokeDescription(
@@ -216,6 +216,27 @@ class DividerAccessibilityService : AccessibilityService() {
         return dispatchStroke(dragStroke)
     }
 
+    /**
+     * Two-finger swipe: two parallel strokes in ONE GestureDescription = real multi-touch.
+     * Fingers sit side by side ([fingerGapPx] apart, perpendicular offset on X — callers
+     * swipe vertically). Suspends until the gesture finishes playing.
+     */
+    suspend fun twoFingerSwipe(from: Point, to: Point, fingerGapPx: Int, durationMs: Long): Boolean {
+        val builder = GestureDescription.Builder()
+        for (dx in intArrayOf(-fingerGapPx / 2, fingerGapPx / 2)) {
+            builder.addStroke(
+                GestureDescription.StrokeDescription(
+                    Path().apply {
+                        moveTo((from.x + dx).toFloat(), from.y.toFloat())
+                        lineTo((to.x + dx).toFloat(), to.y.toFloat())
+                    },
+                    0, durationMs, false,
+                ),
+            )
+        }
+        return awaitDispatch(builder.build())
+    }
+
     /** Fire-and-forget tap at a screen coordinate; true = the gesture was accepted. */
     fun tapPoint(x: Int, y: Int): Boolean {
         val path = Path().apply { moveTo(x.toFloat(), y.toFloat()) }
@@ -228,12 +249,33 @@ class DividerAccessibilityService : AccessibilityService() {
     private suspend fun dispatchStroke(
         stroke: GestureDescription.StrokeDescription,
         releaseOnCancelAt: Point? = null,
+    ): Boolean = awaitDispatch(GestureDescription.Builder().addStroke(stroke).build()) {
+        // The stroke was dispatched with willContinue=true and its continuation will
+        // never come: send a zero-length terminating continuation so the system lifts
+        // the injected pointer.
+        if (releaseOnCancelAt != null && stroke.willContinue()) {
+            runCatching {
+                val release = stroke.continueStroke(
+                    Path().apply {
+                        moveTo(releaseOnCancelAt.x.toFloat(), releaseOnCancelAt.y.toFloat())
+                    },
+                    0, 1, false,
+                )
+                dispatchGesture(
+                    GestureDescription.Builder().addStroke(release).build(), null, null,
+                )
+            }
+        }
+    }
+
+    private suspend fun awaitDispatch(
+        gesture: GestureDescription,
+        onCancel: () -> Unit = {},
     ): Boolean {
         // A dead service connection may never deliver the callback: bound the wait
         // so a caller can't hang forever on a gesture that will not complete.
         val result = withTimeoutOrNull(GESTURE_TIMEOUT_MS) {
             suspendCancellableCoroutine { cont ->
-                val gesture = GestureDescription.Builder().addStroke(stroke).build()
                 val dispatched = dispatchGesture(
                     gesture,
                     object : GestureResultCallback() {
@@ -248,24 +290,7 @@ class DividerAccessibilityService : AccessibilityService() {
                     null,
                 )
                 if (!dispatched && cont.isActive) cont.resume(false)
-                cont.invokeOnCancellation {
-                    // The stroke was dispatched with willContinue=true and its
-                    // continuation will never come: send a zero-length terminating
-                    // continuation so the system lifts the injected pointer.
-                    if (releaseOnCancelAt != null && stroke.willContinue()) {
-                        runCatching {
-                            val release = stroke.continueStroke(
-                                Path().apply {
-                                    moveTo(releaseOnCancelAt.x.toFloat(), releaseOnCancelAt.y.toFloat())
-                                },
-                                0, 1, false,
-                            )
-                            dispatchGesture(
-                                GestureDescription.Builder().addStroke(release).build(), null, null,
-                            )
-                        }
-                    }
-                }
+                cont.invokeOnCancellation { onCancel() }
             }
         }
         return result ?: false

@@ -1,6 +1,5 @@
 package com.displaysplitter.split
 
-import android.accessibilityservice.AccessibilityService
 import android.content.Context
 import android.graphics.Point
 import android.graphics.Rect
@@ -80,9 +79,9 @@ class EngagementController(
     private val _visiblePackages = MutableStateFlow<Set<String>>(emptySet())
 
     /** The bubble shows only when an enabled video app is visible, on the inner display,
-     *  outside Flex mode. It is force-hidden while Engaging: the entry recipe drives the
-     *  Recents UI with gesture taps, which take the finger's hit-test path — our own
-     *  touchable overlay would swallow them (SplitEntryDriver). */
+     *  outside Flex mode. It is force-hidden while Engaging: the entry injects the split
+     *  swipe and picker taps, which take the finger's hit-test path — our own touchable
+     *  overlay would swallow them (SplitEntryDriver). */
     val bubbleVisible: StateFlow<Boolean> = combine(
         settings.state, _visiblePackages, _state, _posture,
         combine(_serviceConnected, _onInnerDisplay) { c, i -> c && i },
@@ -285,30 +284,21 @@ class EngagementController(
 
         _state.value = EngageState.Engaging(pkg)
 
-        // 1. Ensure a split containing the video and our spacer exists. Recents-UI
-        //    automation (SplitEntryDriver) is the only initiation that works on
-        //    One UI 8+ — TOGGLE_SPLIT_SCREEN was removed from the framework and
-        //    LAUNCH_ADJACENT is ignored for background callers (verified on device).
+        // 1. Ensure a split containing the video and our spacer exists. Initiation =
+        //    injected two-finger bottom→top swipe (One UI's multi-window split gesture)
+        //    on the foreground video app, then a picker tap (SplitEntryDriver) —
+        //    TOGGLE_SPLIT_SCREEN was removed from the framework and LAUNCH_ADJACENT is
+        //    ignored for background callers (verified on device).
         //    Settled read: One UI's embedded divider window flickers out of the a11y
         //    windows list, and a single missed read here would re-run the whole entry
         //    over a perfectly good split.
         var snap = settledPanes(service, pkg)
         if (snap?.divider == null || snap.spacer == null || snap.video == null) {
-            // Drop the video's card on the edge of the pane it should END UP in, so
-            // the common case needs no pane swap afterwards.
-            val display = service.displayBounds()
-            val cutouts = service.displayCutoutRects()
-                .map { Box(it.left, it.top, it.right, it.bottom) }
-            val videoOnTop = RatioMath.resolveVideoSide(
-                display.height(), cutouts, s.positionPref,
-            ) == PaneSide.FIRST
-            val entered = SplitEntryDriver(service).enterSplit(pkg, videoOnTop)
+            val entered = SplitEntryDriver(service).enterSplit(pkg)
             if (abortRequested(service)) return
-            if (!entered) {
-                // Don't strand the user in Recents/split-select: back out once.
-                runCatching { service.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK) }
-                return fail(FailReason.SPLIT_UNAVAILABLE)
-            }
+            // The driver has already backed out of any transient UI it opened; a
+            // step-1 (swipe) failure leaves the user's app untouched on purpose.
+            if (!entered) return fail(FailReason.SPLIT_UNAVAILABLE)
             // The entry verified the pane PAIR, but the divider window lags the commit
             // animation — give it a real settle budget before declaring it lost.
             val deadline = SystemClock.uptimeMillis() + POST_ENTRY_SETTLE_MS
@@ -325,7 +315,8 @@ class EngagementController(
 
         // 2. Planning needs a horizontal divider (top/bottom panes — the only layout
         //    where the full-width video pane can hit the exact ratio). A left/right
-        //    split (manual entry) is rotated once via the divider popup.
+        //    split (manual entry, or the swipe gesture docking to a side) is rotated
+        //    once via the divider popup.
         val divider = snap?.divider ?: return fail(FailReason.DIVIDER_LOST)
         if (divider.width() < divider.height()) {
             val rotated = SplitEntryDriver(service).rotateToTopBottom(ROTATE_TIMEOUT_MS) {

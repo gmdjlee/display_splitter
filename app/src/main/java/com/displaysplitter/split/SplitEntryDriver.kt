@@ -13,57 +13,39 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.withTimeoutOrNull
 
 /**
- * Enters a TOP/BOTTOM split with [the video app, our spacer] by driving the One UI
- * Recents UI through the accessibility service — the only split-entry path that works
- * on One UI 8+ (`GLOBAL_ACTION_TOGGLE_SPLIT_SCREEN` was removed from the framework and
+ * Enters a split with [the video app, our spacer] by injecting One UI's "swipe up with
+ * two fingers" split-screen gesture through the accessibility service, then tapping our
+ * spacer in the partner picker. The user must have the One UI multi-window two-finger
+ * swipe gesture enabled (Settings → Advanced features → Multi window). The swipe
+ * coordinates derive from the CURRENT display bounds, so the gesture is always visually
+ * bottom→top no matter how the device is rotated.
+ *
+ * (`GLOBAL_ACTION_TOGGLE_SPLIT_SCREEN` was removed from the framework and
  * `FLAG_ACTIVITY_LAUNCH_ADJACENT` is ignored for background callers; both were verified
- * dead on a real Fold7, here and independently in FoldWindow's device facts).
- *
- * Ported from FoldWindow's device-verified SplitEntry (15/15 E2E on Fold7 / One UI 8),
- * specialised to the top/bottom layout this app needs:
- *
- *  - [EntryRecipe.DRAG] (resizeable target apps, default): open Recents → hold-drag the
- *    target's card icon to the TOP edge (top/bottom split-select) → tap our spacer in
- *    the partner picker.
- *  - [EntryRecipe.MENU] (unresizeable apps, e.g. Netflix — the drag drop gets routed to
- *    a pop-up window): open Recents → tap the card icon → tap "Open in split screen"
- *    (left/right split-select) → tap our spacer in the picker → tap the divider handle →
- *    "Rotate clockwise" popup converts left/right to top/bottom.
+ * dead on a real Fold7, here and independently in FoldWindow's device facts.)
  *
  * Every step follows measure-don't-sleep: perform the action, then poll the step's
  * success condition with a deadline. Each step first re-checks its success condition
  * so a previous attempt's late settle is absorbed instead of re-triggering the action.
  *
- * The floating bubble/panel MUST be detached while this runs — gesture taps take the
- * same hit-test path as a finger, and our own touchable overlay would swallow them
+ * The floating bubble/panel MUST be detached while this runs — injected swipes/taps take
+ * the same hit-test path as a finger, and our own touchable overlay would swallow them
  * (measured failure class in FoldWindow). EngagementController hides the overlay for
  * the whole Engaging state.
  */
 class SplitEntryDriver(private val service: DividerAccessibilityService) {
-
-    enum class EntryRecipe(val stepCount: Int) { DRAG(3), MENU(5) }
 
     private data class EntryContext(
         val targetPackage: String,
         val targetLabel: String?,
         val selfPackage: String,
         val panelLabel: String,
-        val screen: Box,
-        val recipe: EntryRecipe,
-        /** DRAG recipe drop edge: the pane the video should END UP in — dropping on the
-         *  matching edge makes the common case need no pane swap at all. */
-        val videoOnTop: Boolean,
     )
 
-    /** Runs the full recipe. False = a step failed; the caller owns cleanup/fail UX. */
-    suspend fun enterSplit(targetPackage: String, videoOnTop: Boolean): Boolean {
+    /** Runs the two-step entry. False = a step failed; the driver has already backed
+     *  out of any transient UI it opened — the caller only owns the fail UX. */
+    suspend fun enterSplit(targetPackage: String): Boolean {
         val pm = service.packageManager
-        val recipe = if (ResizeMode.isActivitiesUnresizeable(pm, targetPackage) == true) {
-            EntryRecipe.MENU
-        } else {
-            EntryRecipe.DRAG // resizeable confirmed OR undecidable — DRAG is the safe default
-        }
-        val display = service.displayBounds()
         val ctx = EntryContext(
             targetPackage = targetPackage,
             targetLabel = runCatching {
@@ -71,12 +53,9 @@ class SplitEntryDriver(private val service: DividerAccessibilityService) {
             }.getOrNull(),
             selfPackage = service.packageName,
             panelLabel = service.getString(R.string.spacer_label),
-            screen = Box(display.left, display.top, display.right, display.bottom),
-            recipe = recipe,
-            videoOnTop = videoOnTop,
         )
-        Log.i(TAG, "enterSplit: pkg=$targetPackage label=${ctx.targetLabel} recipe=$recipe videoOnTop=$videoOnTop")
-        for (step in 1..recipe.stepCount) {
+        Log.i(TAG, "enterSplit: pkg=$targetPackage label=${ctx.targetLabel} (two-finger swipe)")
+        for (step in 1..STEP_COUNT) {
             var ok = false
             // Re-attempts are safe: every step first re-checks its own success condition,
             // so a late settle from the first attempt is absorbed instead of re-firing
@@ -91,16 +70,28 @@ class SplitEntryDriver(private val service: DividerAccessibilityService) {
                     false
                 }
                 if (ok) break
-                Log.w(TAG, "enterSplit: step $step attempt $attempt failed (recipe=$recipe)")
+                Log.w(TAG, "enterSplit: step $step attempt $attempt failed")
             }
-            if (!ok) return false
+            if (!ok) {
+                // A step-1 failure changed nothing on screen (the swipe was ignored) —
+                // injecting BACK there would poke the user's fullscreen app. Only later
+                // steps leave split-select/picker UI up that one BACK dismisses.
+                if (step > 1) {
+                    runCatching {
+                        service.performGlobalAction(
+                            android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_BACK,
+                        )
+                    }
+                }
+                return false
+            }
         }
         return true
     }
 
     /**
-     * A pre-existing split can be LEFT/RIGHT (manual entry, or MENU recipe before its
-     * rotate step): tap the divider handle, then the "Rotate clockwise" popup item.
+     * A pre-existing split can be LEFT/RIGHT (manual entry, or the swipe gesture docking
+     * to a side): tap the divider handle, then the "Rotate clockwise" popup item.
      * Succeeds when [settled] turns true within [timeoutMs].
      */
     suspend fun rotateToTopBottom(timeoutMs: Long, settled: () -> Boolean): Boolean =
@@ -141,100 +132,53 @@ class SplitEntryDriver(private val service: DividerAccessibilityService) {
     // Steps
     // ══════════════════════════════════════════════════════════
 
-    private suspend fun performStep(step: Int, ctx: EntryContext): Boolean = when (ctx.recipe) {
-        EntryRecipe.DRAG -> when (step) {
-            1 -> stepOpenRecents(ctx)
-            2 -> dragStepToEdge(ctx)
-            3 -> stepTapPanelInPicker(ctx) { isTopBottomPairPresent(ctx) }
-            else -> false
-        }
-        EntryRecipe.MENU -> when (step) {
-            1 -> stepOpenRecents(ctx)
-            2 -> menuStepTapCardIcon(ctx)
-            3 -> menuStepTapSplitMenu(ctx)
-            4 -> stepTapPanelInPicker(ctx) { isLeftRightPairPresent(ctx) }
-            5 -> rotateToTopBottom(STEP_TIMEOUT_MS) { isTopBottomPairPresent(ctx) }
-            else -> false
-        }
-    }
-
-    /** Open Recents; success = the target's card icon node appears in the launcher tree. */
-    private suspend fun stepOpenRecents(ctx: EntryContext): Boolean {
-        val accepted = runCatching {
-            service.performGlobalAction(android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_RECENTS)
-        }.getOrDefault(false)
-        if (!accepted) Log.w(TAG, "stepOpenRecents: GLOBAL_ACTION_RECENTS returned false — polling anyway")
-        return pollUntil(STEP_TIMEOUT_MS) { findCardIconNode(ctx) != null }
+    private suspend fun performStep(step: Int, ctx: EntryContext): Boolean = when (step) {
+        1 -> stepTwoFingerSwipeUp(ctx)
+        2 -> stepTapPanelInPicker(ctx) { isSplitPairPresent(ctx) }
+        else -> false
     }
 
     /**
-     * DRAG step 2: hold-drag the card icon to the top or bottom screen edge — the
-     * measured `input draganddrop` recipe that produces the TOP/BOTTOM split-select
-     * state with the target docked at the chosen edge (both edges verified on device).
+     * Step 1: inject the two-finger bottom→top swipe on the foreground target. The
+     * gesture splits the CURRENT app, so the target must hold the foreground first.
+     * Success = the target lands in ANY split-select state; a side-docked (left/right)
+     * result is fine — EngagementController rotates it to top/bottom afterwards.
      */
-    private suspend fun dragStepToEdge(ctx: EntryContext): Boolean {
+    private suspend fun stepTwoFingerSwipeUp(ctx: EntryContext): Boolean {
         val deadline = SystemClock.uptimeMillis() + STEP_TIMEOUT_MS
         fun remaining() = (deadline - SystemClock.uptimeMillis()).coerceAtLeast(0)
 
-        // One combined poll: already in split-select (a previous attempt's late settle),
-        // or a card icon with usable bounds (a matched node can transiently report empty
-        // bounds — a "ghost"; keep polling instead of failing the attempt).
-        var already = false
-        var iconBounds: Rect? = null
-        val acquired = pollUntil(remaining()) {
-            if (isTargetInSplitSelectEdge(ctx)) {
-                already = true
-                true
-            } else {
-                val node = findCardIconNode(ctx)
-                val rect = Rect()
-                if (node != null &&
-                    runCatching { node.getBoundsInScreen(rect) }.isSuccess && !rect.isEmpty
-                ) {
-                    iconBounds = rect
-                    true
-                } else {
-                    false
-                }
+        if (isTargetInSplitSelect(ctx)) return true // previous attempt's late settle
+        // Short budget: nothing here can bring the target forward, so a target that is
+        // visible but never focused must fail fast, not burn the whole step timeout.
+        // ponytail: no bring-to-front — add a pane tap-to-focus if that path matters.
+        if (!pollUntil(minOf(FOREGROUND_WAIT_MS, remaining())) {
+                service.activeAppPackage() == ctx.targetPackage
             }
+        ) {
+            Log.w(TAG, "twoFingerSwipeUp: target never held the foreground")
+            return false
         }
-        if (!acquired) return false
-        if (already) return true
-
-        val bounds = iconBounds ?: return false
-        val from = android.graphics.Point(bounds.centerX(), bounds.centerY())
-        val dropY = if (ctx.videoOnTop) {
-            ctx.screen.top + DROP_MARGIN_PX
-        } else {
-            ctx.screen.bottom - DROP_MARGIN_PX
+        // Bounds are read at DISPATCH time, not enterSplit() start: the foreground wait
+        // can span a rotation, and on the near-square panel stale bounds would put the
+        // swipe off-display. Current-rotation bounds keep the gesture visually
+        // bottom→top in any orientation.
+        val screen = screenBox()
+        val from = android.graphics.Point(
+            screen.centerX, screen.bottom - SWIPE_EDGE_MARGIN_PX,
+        )
+        val to = android.graphics.Point(
+            screen.centerX, from.y - (screen.height * SWIPE_TRAVEL_FRACTION).toInt(),
+        )
+        Log.i(TAG, "twoFingerSwipeUp: (${from.x},${from.y}) -> (${to.x},${to.y})")
+        if (!service.twoFingerSwipe(from, to, SWIPE_FINGER_GAP_PX, SWIPE_MOVE_MS)) {
+            Log.w(TAG, "twoFingerSwipeUp: gesture callback=false — polling state anyway")
         }
-        val to = android.graphics.Point(ctx.screen.centerX, dropY)
-        Log.i(TAG, "dragStepToEdge: holdThenDrag (${from.x},${from.y}) -> (${to.x},${to.y})")
-        if (!service.holdThenDrag(from, to, DRAG_HOLD_MS, DRAG_MOVE_MS)) {
-            Log.w(TAG, "dragStepToEdge: gesture callback=false — polling state anyway")
-        }
-        return pollUntil(remaining()) { isTargetInSplitSelectEdge(ctx) }
-    }
-
-    /** MENU step 2: tap the card icon; success = the "split screen" menu item appears. */
-    private suspend fun menuStepTapCardIcon(ctx: EntryContext): Boolean {
-        val deadline = SystemClock.uptimeMillis() + STEP_TIMEOUT_MS
-        fun remaining() = (deadline - SystemClock.uptimeMillis()).coerceAtLeast(0)
-        if (!clickWhenFound(remaining(), "card-icon") { findCardIconNode(ctx) }) return false
-        return pollUntil(remaining()) { findSplitMenuNode() != null }
-    }
-
-    /** MENU step 3: tap "Open in split screen"; success = left/right split-select state. */
-    private suspend fun menuStepTapSplitMenu(ctx: EntryContext): Boolean {
-        if (isTargetInSplitSelectSide(ctx)) return true
-        val deadline = SystemClock.uptimeMillis() + STEP_TIMEOUT_MS
-        fun remaining() = (deadline - SystemClock.uptimeMillis()).coerceAtLeast(0)
-        if (!clickWhenFound(remaining(), "split-menu") { findSplitMenuNode() }) return false
-        return pollUntil(remaining()) { isTargetInSplitSelectSide(ctx) }
+        return pollUntil(remaining()) { isTargetInSplitSelect(ctx) }
     }
 
     /**
-     * Picker step (DRAG 3 / MENU 4): tap our spacer's label in the partner picker.
+     * Picker step (step 2): tap our spacer's label in the partner picker.
      * Click-cycle escalation, gesture-first (FoldWindow's measured worst case: a11y
      * ACTION_CLICK returns true without the click ever taking effect, and its node-identity
      * routing can land on a neighboring non-picker node; gesture taps take the finger's
@@ -293,27 +237,31 @@ class SplitEntryDriver(private val service: DividerAccessibilityService) {
 
     private fun targetWindowMatches(ctx: EntryContext, predicate: (Box, Box) -> Boolean): Boolean {
         val windows = runCatching { service.windows }.getOrDefault(emptyList())
+        val screen = screenBox()
         return windows.any { w ->
             runCatching {
                 if (w.type != AccessibilityWindowInfo.TYPE_APPLICATION) return@runCatching false
                 if (w.root?.packageName?.toString() != ctx.targetPackage) return@runCatching false
                 val bounds = Rect().also { w.getBoundsInScreen(it) }
-                predicate(bounds.toBox(), ctx.screen)
+                predicate(bounds.toBox(), screen)
             }.getOrDefault(false)
         }
     }
 
-    private fun isTargetInSplitSelectEdge(ctx: EntryContext): Boolean =
-        targetWindowMatches(ctx) { pane, screen ->
-            if (ctx.videoOnTop) {
-                PaneGeometry.isSplitSelectTopPane(pane, screen)
-            } else {
-                PaneGeometry.isSplitSelectBottomPane(pane, screen)
-            }
+    /**
+     * Which edge One UI docks the swiped app to can vary by build/orientation: accept
+     * any split-select docking — the pane side is corrected downstream. A COMMITTED
+     * split pane passes the same geometry checks (~50% edge-docked, full cross-axis),
+     * so the divider window — which only exists once a split is committed, never in
+     * split-select — must be absent; otherwise re-entry over an existing
+     * [video, other-app] split would false-positive here and skip the swipe entirely.
+     */
+    private fun isTargetInSplitSelect(ctx: EntryContext): Boolean =
+        dividerBounds() == null && targetWindowMatches(ctx) { pane, screen ->
+            PaneGeometry.isSplitSelectTopPane(pane, screen) ||
+                PaneGeometry.isSplitSelectBottomPane(pane, screen) ||
+                PaneGeometry.isSplitSelectSidePane(pane, screen)
         }
-
-    private fun isTargetInSplitSelectSide(ctx: EntryContext): Boolean =
-        targetWindowMatches(ctx) { pane, screen -> PaneGeometry.isSplitSelectSidePane(pane, screen) }
 
     private fun collectPairState(ctx: EntryContext): Triple<Boolean, Boolean, List<Box>> {
         val windows = runCatching { service.windows }.getOrDefault(emptyList())
@@ -334,14 +282,22 @@ class SplitEntryDriver(private val service: DividerAccessibilityService) {
         return Triple(hasTarget, hasSelf, panes)
     }
 
-    private fun isTopBottomPairPresent(ctx: EntryContext): Boolean {
+    /** Entry success: both panes committed, top/bottom OR left/right — the caller
+     *  rotates a left/right result to top/bottom via the divider popup. */
+    private fun isSplitPairPresent(ctx: EntryContext): Boolean {
         val (hasTarget, hasSelf, panes) = collectPairState(ctx)
-        return hasTarget && hasSelf && PaneGeometry.isTopBottomSplit(panes, ctx.screen)
+        val screen = screenBox()
+        return hasTarget && hasSelf &&
+            (
+                PaneGeometry.isTopBottomSplit(panes, screen) ||
+                    PaneGeometry.isLeftRightSplit(panes, screen)
+                )
     }
 
-    private fun isLeftRightPairPresent(ctx: EntryContext): Boolean {
-        val (hasTarget, hasSelf, panes) = collectPairState(ctx)
-        return hasTarget && hasSelf && PaneGeometry.isLeftRightSplit(panes, ctx.screen)
+    /** Display bounds in the CURRENT rotation — read fresh, never cached across waits. */
+    private fun screenBox(): Box {
+        val d = service.displayBounds()
+        return Box(d.left, d.top, d.right, d.bottom)
     }
 
     // ══════════════════════════════════════════════════════════
@@ -352,64 +308,6 @@ class SplitEntryDriver(private val service: DividerAccessibilityService) {
         runCatching { service.windows }.getOrDefault(emptyList())
             .filter { runCatching { it.root?.packageName?.toString() }.getOrNull() == LAUNCHER_PACKAGE }
             .mapNotNull { runCatching { it.root }.getOrNull() }
-
-    /** The Recents card's small header icon (measured: content-desc "고급 옵션" + app label). */
-    private fun findCardIconNode(ctx: EntryContext): AccessibilityNodeInfo? {
-        val roots = launcherRoots()
-        if (roots.isEmpty()) return null
-        val label = ctx.targetLabel
-        return firstMatch(
-            roots,
-            listOf(
-                { node: AccessibilityNodeInfo ->
-                    val desc = node.contentDescription?.toString().orEmpty()
-                    desc.contains(CARD_ICON_DESC_KO) && (label == null || desc.contains(label))
-                },
-                { node ->
-                    val desc = node.contentDescription?.toString()?.lowercase().orEmpty()
-                    label != null && CARD_ICON_DESC_EN.any { desc.contains(it) } &&
-                        desc.contains(label.lowercase())
-                },
-                // Structural fallback: a clickable node carrying the label. Recents card
-                // BODIES inherit the label too (measured) — dragging the huge card body
-                // destroys the Recents session, so only near-icon-sized nodes qualify
-                // (≤ screen width / 10).
-                { node ->
-                    if (label == null || !node.isClickable ||
-                        node.contentDescription?.toString()?.contains(label) != true
-                    ) {
-                        false
-                    } else {
-                        val rect = Rect()
-                        val gotBounds = runCatching { node.getBoundsInScreen(rect) }.isSuccess
-                        val maxDim = ctx.screen.width / 10
-                        gotBounds && !rect.isEmpty && rect.width() <= maxDim && rect.height() <= maxDim
-                    }
-                },
-            ),
-        )
-    }
-
-    /** The card popup menu's "Open in split screen" item (MENU recipe). */
-    private fun findSplitMenuNode(): AccessibilityNodeInfo? {
-        val roots = launcherRoots()
-        if (roots.isEmpty()) return null
-        return firstMatch(
-            roots,
-            listOf(
-                { node: AccessibilityNodeInfo ->
-                    val text = node.text?.toString().orEmpty()
-                    val desc = node.contentDescription?.toString().orEmpty()
-                    text.contains(SPLIT_MENU_TEXT_KO) || desc.contains(SPLIT_MENU_TEXT_KO)
-                },
-                { node ->
-                    val text = node.text?.toString()?.lowercase().orEmpty()
-                    val desc = node.contentDescription?.toString()?.lowercase().orEmpty()
-                    text.contains(SPLIT_MENU_TEXT_EN) || desc.contains(SPLIT_MENU_TEXT_EN)
-                },
-            ),
-        )
-    }
 
     /**
      * Our spacer's label in the partner picker. Labels are non-clickable text children
@@ -644,12 +542,27 @@ class SplitEntryDriver(private val service: DividerAccessibilityService) {
     private companion object {
         const val TAG = "DisplaySplitter"
 
+        const val STEP_COUNT = 2
         const val POLL_INTERVAL_MS = 150L
-        // 4s was measured too tight: the drag itself plays ~1.1s and the split-select
-        // transition can settle after the remaining budget. 6s × 2 attempts (with
-        // success-precheck absorption) matches FoldWindow's retry design.
+        // 4s was measured too tight: split-select transitions can settle after the
+        // remaining budget. 6s × 2 attempts (with success-precheck absorption)
+        // matches FoldWindow's retry design.
         const val STEP_TIMEOUT_MS = 6_000L
         const val STEP_ATTEMPTS = 2
+        // Transient focus-stealers (dialogs, IME) settle well inside this; a target
+        // that is visible but never focused should fail in ~3s total, not ~12s.
+        const val FOREGROUND_WAIT_MS = 1_500L
+
+        // Two-finger swipe geometry — device-calibration knobs (Fold7 inner display):
+        // start hugging the bottom edge, travel most of the screen height at
+        // real-finger speed, fingers ~180px (~69dp) apart.
+        // Measured (Fold7, One UI 8.5): starting 40px up landed INSIDE the app's bottom
+        // nav row and tap-through opened YouTube's Shorts camera mid-entry; the very
+        // edge (system gesture zone, like a real finger) avoids app button delivery.
+        const val SWIPE_EDGE_MARGIN_PX = 8
+        const val SWIPE_TRAVEL_FRACTION = 0.55f
+        const val SWIPE_FINGER_GAP_PX = 180
+        const val SWIPE_MOVE_MS = 350L
         const val PICKER_TIMEOUT_MS = 10_000L
         const val SEARCH_BUDGET_MS = 2_500L
         const val PICKER_CLICK_CYCLES = 3
@@ -665,20 +578,11 @@ class SplitEntryDriver(private val service: DividerAccessibilityService) {
         const val LAUNCHER_PACKAGE = "com.sec.android.app.launcher"
 
         // Measured selectors (Korean, One UI 8); English candidates unverified.
-        const val CARD_ICON_DESC_KO = "고급 옵션"
-        val CARD_ICON_DESC_EN = listOf("more options", "advanced options")
-        const val SPLIT_MENU_TEXT_KO = "분할 화면"
-        const val SPLIT_MENU_TEXT_EN = "split screen"
         const val ROTATE_DESC_KO = "시계 방향으로 회전"
         const val ROTATE_DESC_EN = "rotate"
         const val SWITCH_DESC_KO = "창 전환"
         const val SWITCH_DESC_EN = "switch"
         const val SEARCH_DESC_KO = "검색"
         const val SEARCH_DESC_EN = "search"
-
-        /** Measured drop recipe: card icon → top edge, y = screen.top + 150px. */
-        const val DROP_MARGIN_PX = 150
-        const val DRAG_HOLD_MS = 500L
-        const val DRAG_MOVE_MS = 600L
     }
 }
