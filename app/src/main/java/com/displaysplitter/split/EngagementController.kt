@@ -21,6 +21,8 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlin.coroutines.coroutineContext
@@ -95,6 +97,43 @@ class EngagementController(
     private var reengageJob: Job? = null
     private var disengageGraceJob: Job? = null
     private var boundsJob: Job? = null
+
+    init {
+        // Target ratio changed while engaged (quick panel or settings screen): re-drag
+        // to the new target. Observed from the settings flow so every ratio entry point
+        // gets this without wiring; the ratio is passed straight to adjustToPlan, never
+        // re-read via the StateFlow (same ordering caveat as flipVideoSide).
+        scope.launch {
+            settings.state.map { it.ratio }.distinctUntilChanged().collect { ratio ->
+                if (ratio == null) return@collect
+                // Ratio changed mid-engagement: let it land first, then correct to the
+                // newest target (StateFlow conflation keeps only the latest value).
+                engageJob?.join()
+                val st = _state.value as? EngageState.Engaged ?: return@collect
+                val service = DividerAccessibilityService.instance ?: return@collect
+                if (engageJob?.isActive == true) return@collect
+                if (RatioMath.isWithinTolerance(st.achievedRatio, ratio)) return@collect
+                engageJob = scope.launch {
+                    // Engaging force-hides the overlay window; wait out the hide debounce
+                    // (250ms) before injecting — the drag takes the finger's hit-test path
+                    // and the still-open quick panel would swallow it (see bubbleVisible).
+                    _state.value = EngageState.Engaging(st.packageName)
+                    delay(OVERLAY_HIDE_SETTLE_MS)
+                    // Only adjust a split that is visibly intact (e.g. the settings screen
+                    // fullscreen over the split hides the divider): failing would tear the
+                    // healthy split down, so skip — the ratio applies on the next engage.
+                    val snap = settledPanes(service, st.packageName)
+                    if (snap?.divider == null || snap.video == null) {
+                        _state.value = st
+                        return@launch
+                    }
+                    // ponytail: failures past this point keep engage-path semantics
+                    // (Failed → spacer teardown); fail-soft needs adjustToPlan surgery.
+                    adjustToPlan(service, st.packageName, ratio, retriesLeft = 1)
+                }
+            }
+        }
+    }
 
     /** Package engaged when the device was folded shut, for auto re-engage on unfold. */
     private var reengagePackage: String? = null
@@ -508,6 +547,8 @@ class EngagementController(
         const val SWAP_SETTLE_MS = 650L
         const val DRAG_SETTLE_MS = 600L
         const val BOUNDS_SETTLE_MS = 250L
+        // Covers OverlayService's 250ms hide debounce + removeViewImmediate, with margin.
+        const val OVERLAY_HIDE_SETTLE_MS = 600L
         const val REENGAGE_DEBOUNCE_MS = 800L
         const val DISENGAGE_GRACE_MS = 1_500L
         const val REENGAGE_WINDOW_MS = 60_000L
