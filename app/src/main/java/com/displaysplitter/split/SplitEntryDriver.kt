@@ -40,11 +40,14 @@ class SplitEntryDriver(private val service: DividerAccessibilityService) {
         val targetLabel: String?,
         val selfPackage: String,
         val panelLabel: String,
+        val revealBarsFirst: Boolean,
     )
 
     /** Runs the two-step entry. False = a step failed; the driver has already backed
-     *  out of any transient UI it opened — the caller only owns the fail UX. */
-    suspend fun enterSplit(targetPackage: String): Boolean {
+     *  out of any transient UI it opened — the caller only owns the fail UX.
+     *  [revealBarsFirst]: the target is immersive fullscreen (bars hidden), where One UI
+     *  ignores the two-finger split gesture — reveal the bars before swiping. */
+    suspend fun enterSplit(targetPackage: String, revealBarsFirst: Boolean = false): Boolean {
         val pm = service.packageManager
         val ctx = EntryContext(
             targetPackage = targetPackage,
@@ -53,6 +56,7 @@ class SplitEntryDriver(private val service: DividerAccessibilityService) {
             }.getOrNull(),
             selfPackage = service.packageName,
             panelLabel = service.getString(R.string.spacer_label),
+            revealBarsFirst = revealBarsFirst,
         )
         Log.i(TAG, "enterSplit: pkg=$targetPackage label=${ctx.targetLabel} (two-finger swipe)")
         for (step in 1..STEP_COUNT) {
@@ -158,6 +162,22 @@ class SplitEntryDriver(private val service: DividerAccessibilityService) {
         ) {
             Log.w(TAG, "twoFingerSwipeUp: target never held the foreground")
             return false
+        }
+        // Immersive fullscreen: One UI does not recognize the two-finger split gesture
+        // while the system bars are hidden — both swipe attempts die silently (measured
+        // on Fold7/One UI 8.5, fullscreen YouTube). A single-finger bottom-edge swipe
+        // is consumed by sticky-immersive as "reveal bars" and ONLY sent when the bars
+        // are hidden, so it can never register as the HOME gesture; with the bars
+        // transiently visible the split gesture is recognized first try (validated).
+        if (ctx.revealBarsFirst) {
+            val s = screenBox()
+            Log.i(TAG, "revealBars: single-finger edge swipe before split gesture")
+            service.singleFingerSwipe(
+                android.graphics.Point(s.centerX, s.bottom - REVEAL_EDGE_MARGIN_PX),
+                android.graphics.Point(s.centerX, s.bottom - REVEAL_TRAVEL_PX),
+                REVEAL_SWIPE_MS,
+            )
+            delay(REVEAL_SETTLE_MS)
         }
         // Bounds are read at DISPATCH time, not enterSplit() start: the foreground wait
         // can span a rotation, and on the near-square panel stale bounds would put the
@@ -563,6 +583,13 @@ class SplitEntryDriver(private val service: DividerAccessibilityService) {
         const val SWIPE_TRAVEL_FRACTION = 0.55f
         const val SWIPE_FINGER_GAP_PX = 180
         const val SWIPE_MOVE_MS = 350L
+        // Immersive bar-reveal nudge — exact params validated on device (Fold7):
+        // bottom-4px → 180px up in 120ms revealed the bars; the split gesture
+        // dispatched ~450ms later was recognized first try.
+        const val REVEAL_EDGE_MARGIN_PX = 4
+        const val REVEAL_TRAVEL_PX = 180
+        const val REVEAL_SWIPE_MS = 120L
+        const val REVEAL_SETTLE_MS = 450L
         const val PICKER_TIMEOUT_MS = 10_000L
         const val SEARCH_BUDGET_MS = 2_500L
         const val PICKER_CLICK_CYCLES = 3

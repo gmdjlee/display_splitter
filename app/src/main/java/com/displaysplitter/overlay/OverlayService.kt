@@ -187,6 +187,14 @@ class OverlayService : Service() {
             // re-anchor so the window doesn't jump by the inter-finger distance.
             onPointerChange = { if (dragBounds != null) startDrag() },
         )
+        // Hidden status bar = the app under us is immersive fullscreen; the split entry
+        // must reveal the bars before the two-finger gesture (see SplitEntryDriver).
+        // This overlay window is the app's only live view of bar visibility.
+        root.setOnApplyWindowInsetsListener { _, insets ->
+            controller.statusBarsVisible =
+                insets.isVisible(android.view.WindowInsets.Type.statusBars())
+            insets
+        }
         val composeView = ComposeView(overlayContext).apply {
             setContent {
                 OverlayContent(

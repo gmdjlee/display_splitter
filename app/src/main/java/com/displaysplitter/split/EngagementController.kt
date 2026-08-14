@@ -98,6 +98,15 @@ class EngagementController(
     private var disengageGraceJob: Job? = null
     private var boundsJob: Job? = null
 
+    /**
+     * Status-bar visibility sampled from the overlay window's insets (OverlayService).
+     * Hidden bars = the foreground app is immersive fullscreen, where One UI ignores
+     * the two-finger split gesture (measured on device) — the entry must reveal the
+     * bars first. Last-known value: the overlay is detached while Engaging, but the
+     * user's Apply tap guarantees a fresh sample moments before engage() runs.
+     */
+    var statusBarsVisible: Boolean = true
+
     init {
         // Target ratio changed while engaged (quick panel or settings screen): re-drag
         // to the new target. Observed from the settings flow so every ratio entry point
@@ -333,7 +342,8 @@ class EngagementController(
         //    over a perfectly good split.
         var snap = settledPanes(service, pkg)
         if (snap?.divider == null || snap.spacer == null || snap.video == null) {
-            val entered = SplitEntryDriver(service).enterSplit(pkg)
+            val entered = SplitEntryDriver(service)
+                .enterSplit(pkg, revealBarsFirst = !statusBarsVisible)
             if (abortRequested(service)) return
             // The driver has already backed out of any transient UI it opened; a
             // step-1 (swipe) failure leaves the user's app untouched on purpose.

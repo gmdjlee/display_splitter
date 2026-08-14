@@ -216,6 +216,20 @@ class DividerAccessibilityService : AccessibilityService() {
         return dispatchStroke(dragStroke)
     }
 
+    /** Single-finger swipe. Suspends until the gesture finishes playing. */
+    suspend fun singleFingerSwipe(from: Point, to: Point, durationMs: Long): Boolean =
+        awaitDispatch(
+            GestureDescription.Builder().addStroke(
+                GestureDescription.StrokeDescription(
+                    Path().apply {
+                        moveTo(from.x.toFloat(), from.y.toFloat())
+                        lineTo(to.x.toFloat(), to.y.toFloat())
+                    },
+                    0, durationMs, false,
+                ),
+            ).build(),
+        )
+
     /**
      * Two-finger swipe: two parallel strokes in ONE GestureDescription = real multi-touch.
      * Fingers sit side by side ([fingerGapPx] apart, perpendicular offset on X — callers
