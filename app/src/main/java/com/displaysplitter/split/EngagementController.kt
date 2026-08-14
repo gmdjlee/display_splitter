@@ -114,20 +114,36 @@ class EngagementController(
     var statusBarsVisible: Boolean = true
 
     init {
-        // Target ratio changed while engaged (quick panel or settings screen): re-drag
-        // to the new target. Observed from the settings flow so every ratio entry point
-        // gets this without wiring; the ratio is passed straight to adjustToPlan, never
-        // re-read via the StateFlow (same ordering caveat as flipVideoSide).
+        // Target ratio or video position changed while engaged (quick panel or settings
+        // screen): re-adjust to the new target. Observed from the settings flow so every
+        // entry point gets this without wiring; both values are passed straight to
+        // adjustToPlan, never re-read via the StateFlow (same ordering caveat as
+        // flipVideoSide).
         scope.launch {
-            settings.state.map { it.ratio }.distinctUntilChanged().collect { ratio ->
+            var last: Pair<AspectRatio?, PositionPref>? = null
+            settings.state.map { it.ratio to it.positionPref }.distinctUntilChanged().collect { cur ->
+                val (ratio, pref) = cur
+                val ratioChanged = last != null && last?.first != ratio
+                val prefChanged = last != null && last?.second != pref
+                last = cur
                 if (ratio == null) return@collect
-                // Ratio changed mid-engagement: let it land first, then correct to the
-                // newest target (StateFlow conflation keeps only the latest value).
+                // Changed mid-engagement: let the in-flight run land first, then correct
+                // to the newest target (StateFlow conflation keeps only the latest value).
                 engageJob?.join()
                 val st = _state.value as? EngageState.Engaged ?: return@collect
                 val service = DividerAccessibilityService.instance ?: return@collect
                 if (engageJob?.isActive == true) return@collect
-                if (RatioMath.isWithinTolerance(st.achievedRatio, ratio)) return@collect
+                val needRatio = ratioChanged && !RatioMath.isWithinTolerance(st.achievedRatio, ratio)
+                // FIRST/SECOND already satisfied by the current side is a no-op — this
+                // also swallows the pref emission flipVideoSide persists after a
+                // successful flip. AUTO always re-plans: only RatioMath.plan knows which
+                // side AUTO resolves to on this geometry.
+                val needPref = prefChanged && when (pref) {
+                    PositionPref.FIRST -> st.plan.videoSide != PaneSide.FIRST
+                    PositionPref.SECOND -> st.plan.videoSide != PaneSide.SECOND
+                    PositionPref.AUTO -> true
+                }
+                if (!needRatio && !needPref) return@collect
                 engageJob = scope.launch {
                     // Engaging detaches the overlay immediately (OverlayService skips its
                     // hide debounce for this state); handshake on the actual detach — the
@@ -137,7 +153,7 @@ class EngagementController(
                     awaitOverlayDetached()
                     // Only adjust a split that is visibly intact (e.g. the settings screen
                     // fullscreen over the split hides the divider): failing would tear the
-                    // healthy split down, so skip — the ratio applies on the next engage.
+                    // healthy split down, so skip — the change applies on the next engage.
                     val snap = settledPanes(service, st.packageName)
                     if (snap?.divider == null || snap.video == null) {
                         _state.value = st
@@ -145,7 +161,7 @@ class EngagementController(
                     }
                     // ponytail: failures past this point keep engage-path semantics
                     // (Failed → spacer teardown); fail-soft needs adjustToPlan surgery.
-                    adjustToPlan(service, st.packageName, ratio, retriesLeft = 1)
+                    adjustToPlan(service, st.packageName, ratio, retriesLeft = 1, positionPrefOverride = pref)
                 }
             }
         }

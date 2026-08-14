@@ -1,30 +1,52 @@
 # On-device verification — Galaxy Z Fold7 / Fold8
 
-## Pending — 2026-08-15: spacer recents card kept + ambient widgets (needs a device pass)
+## Results — 2026-08-15 (2): live 영상 위치 change while engaged VERIFIED (SM-F966N)
 
-Two deliberate changes await on-device confirmation:
+Changing the panel's 영상 위치 chip mid-engagement now re-applies immediately (the
+ratio observer was widened to a combined ratio+positionPref observer, per-element
+change detection). Measured: 위 → swap to TOP in 2.4s, 아래 → swap to BOTTOM in 0.5s,
+both landing exact 1.7777778; re-tapping the already-active chip is a pure no-op
+(zero controller activity — this same guard swallows the pref emission that
+flipVideoSide persists after a successful tray flip, so no double-adjust); 자동
+re-plans and converges without an unnecessary swap when the side already matches.
+Unrelated known flake reproduced once during setup: swap handle tap-through opened
+the Shorts camera → ADJUST_FAILED; retry engaged fine.
 
-1. **Picker discovery is now card-first.** The spacer is no longer excluded from
-   recents and every exit is a plain `finish()` (never `finishAndRemoveTask`), so its
-   task card survives and the partner picker's recent-tasks section lists it at MRU —
-   the search escalation should only ever run on a truly fresh install. Basis:
-   FoldWindow measured facts (DESIGN_27 G1: finish keeps the card and it reappears as
-   picker item #1; G3: tapping a dead card lands correctly in the split pane, same
-   task reused, no fullscreen steal). Re-verify the "Picker discovery" row: engage,
-   restore, engage again — the second engage must tap the card directly with no
-   search, and noticeably faster.
-2. **Ambient widgets in the spacer** (tap → tray: 시계/메모/검정 + 위치 전환/전체
-   화면). The restore row's label changed: 전체 화면으로 → **전체 화면** (tray chip).
-   Recents thumbnails are disabled for the spacer (`setRecentsScreenshotEnabled(false)`,
-   API 33+) so a typed memo never shows in recents/picker snapshots — confirm the
-   card renders with icon+label and the picker still matches it.
+## Results — 2026-08-15: spacer recents card + ambient widgets VERIFIED (SM-F966N, One UI 8.5, ADB-driven)
 
-Known trade-offs accepted with the card (re-check #9's "zero cover-screen footprint"
-wording): the "DS 스페이서" card is visible in recents on both displays; tapping it
-outside an engagement launches-and-finishes on the first frame (state collector).
-Tapping it inside the USER'S own manual split-select while the app is Idle dissolves
-that half-built split — same dead-end class that already existed via the picker's
-frequent-apps row, now merely more prominent.
+Both pending changes pass on device. Three engage cycles run (YouTube feed, immersive
+live video ×2), all committed successfully.
+
+| Verified | Detail |
+|---|---|
+| Card-first picker discovery | Engage #1 (no card yet): `picker: cycle=0 search-escalation=true`, engage 5.98s. Engage #2 (dead card at MRU): `picker: cycle=0 dispatched=true` — **no search, 2.91s, >2× faster**. Card survives `finish()` exactly as designed (HoneySpace logs `DS 스페이서 [RecentApp]` after the spacer dies). |
+| Search fallback when card absent | Engage #3 ran after the dead card was consumed (see below): search escalation kicked in automatically, engage 5.2s, committed. Fresh-install path stays healthy. |
+| Dead-card tap outside engagement | Accidentally measured: tapping the dead card in recents while Idle launches-and-finishes on the first frame (`isRunning=true→false` in ~200ms, no stuck fullscreen spacer, lands back where you were). **Consuming the card this way removes the task from recents** — the next engage is search-path, then the new card re-seeds card-first. Documented trade-off behaves as designed. |
+| Widget tray | Pane tap → one tray: [시계|메모|검정] + 위치 전환/전체 화면, 검정 default, 4s auto-hide. All five controls exercised. |
+| CLOCK | Large ambient time + date (8월 15일 토요일), dim luminance ladder as designed, centered, no layout shift. |
+| MEMO | Typed via ADB: field focus opens IME, tray folds away; "자동 저장됨" indicator appears only after the real write commits, then self-dismisses. Escape path from MEMO (field margins / status-line strip) works — the field consumes its own taps, so tray toggling needs the margins, as documented. |
+| Memo + mode persistence | Restore → re-engage: new spacer instance restores MEMO mode AND the typed text from DataStore with zero input. ON_PAUSE flush + seed-once read verified end-to-end. |
+| Recents thumbnail privacy | Spacer card face renders PLAIN DARK in recents — typed memo never appears (`setRecentsScreenshotEnabled(false)` works on One UI 8.5). Label renders (HoneySpace `label:DS 스페이서`); the picker matches the card (engage #2 cycle-0 hit). |
+| 위치 전환 (flip chip) | Divider-popup 창 전환 driven; panes swapped video→TOP, spacer→BOTTOM; re-settled at **1.7777778 exact=true** (flip landed on the exact 16:9 snap). |
+| 전체 화면 (restore chip) | Split dissolves, video app fullscreen, state Idle, spacer window gone (`dumpsys window` count 0). |
+
+Snap-grid note: achieved ratios across entries were 1.814 / 1.716 / 1.740 / 1.7778 —
+One UI's ~20px grid scatters around 16:9 and the app reports each honestly
+(`exact` only at 1.7778).
+
+ADB-driving traps learned this pass (for future sessions):
+- **NEVER run `uiautomator dump` while engaged** — registering UiAutomation disrupts
+  the a11y service connection and the engagement dissolves within a second (spacer
+  finishes via the state collector; overlay churns detach/attach). Cost one engage.
+- Spacer tray auto-hides in 4s: reveal-tap + chip-tap must be chained in ONE adb
+  command. Remember taps TOGGLE — a stray pane tap between chains flips parity.
+- Overlay panel Apply y drifts with bubble y (measured 1544 vs 1652); bubble idle y
+  drifts too (795 vs 881). Always screencap before tapping panel buttons.
+- In MEMO mode, tray reveal needs the field margins (top status strip ~y<85 in-pane,
+  or side gutters); a field tap re-opens the IME instead.
+
+Still pending (physical, user hands): cover-screen recents card visibility/wording
+(#9), fold/flex transitions, Netflix pop-up-player quirk.
 
 ## Results — 2026-08-13: FWA-ported Recents entry VERIFIED WORKING (SM-F966N, One UI 8.5)
 
