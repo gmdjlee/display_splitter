@@ -60,11 +60,22 @@
     <string name="open_settings">설정</string>
     <string name="close">닫기</string>
 
-    <string name="spacer_exit">전체 화면으로</string>
-    <string name="spacer_flip">영상 위치 바꾸기</string>
+    <string name="spacer_exit">전체 화면</string>
+    <string name="spacer_flip">위치 전환</string>
     <!-- 분할 파트너 피커에 노출되는 스페이서 라벨. 앱 이름과 서로 부분 문자열이면 안 됨
          (진입 레시피가 contains(라벨)로 피커 노드를 찾음). -->
     <string name="spacer_label">DS 스페이서</string>
+
+    <string name="spacer_mode_clock">시계</string>
+    <string name="spacer_mode_memo">메모</string>
+    <string name="spacer_mode_black">검정</string>
+    <string name="spacer_reveal_controls">스페이서 컨트롤 표시</string>
+    <string name="spacer_hide_controls">스페이서 컨트롤 숨기기</string>
+    <string name="spacer_memo_placeholder">메모를 입력하세요…</string>
+    <string name="spacer_memo_saving">저장 중…</string>
+    <string name="spacer_memo_saved">자동 저장됨</string>
+    <string name="spacer_memo_save_failed">저장하지 못했어요 — 다시 입력하면 재시도해요</string>
+    <string name="spacer_memo_cap_reached">최대 글자 수에 도달했어요</string>
 
     <string name="about_footer">내부 화면에서만 동작해요. 플렉스 모드와 커버 화면에는 관여하지 않아요. 자막과 제스처는 영상 앱과 One UI 설정을 그대로 따라요.</string>
 

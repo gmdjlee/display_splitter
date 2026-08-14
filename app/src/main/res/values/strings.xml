@@ -60,11 +60,22 @@
     <string name="open_settings">Settings</string>
     <string name="close">Close</string>
 
-    <string name="spacer_exit">Restore full screen</string>
-    <string name="spacer_flip">Flip video position</string>
+    <string name="spacer_exit">Full screen</string>
+    <string name="spacer_flip">Flip</string>
     <!-- Partner-picker label for the spacer pane. Must NOT be a substring of app_name
          (and vice versa): the entry recipe matches picker nodes by contains(label). -->
     <string name="spacer_label">DS Spacer</string>
+
+    <string name="spacer_mode_clock">Clock</string>
+    <string name="spacer_mode_memo">Memo</string>
+    <string name="spacer_mode_black">Black</string>
+    <string name="spacer_reveal_controls">Show spacer controls</string>
+    <string name="spacer_hide_controls">Hide spacer controls</string>
+    <string name="spacer_memo_placeholder">Write a note…</string>
+    <string name="spacer_memo_saving">Saving…</string>
+    <string name="spacer_memo_saved">Saved</string>
+    <string name="spacer_memo_save_failed">Couldn\'t save — keep typing to retry</string>
+    <string name="spacer_memo_cap_reached">Character limit reached</string>
 
     <string name="about_footer">Only the inner screen is adjusted. Flex mode and the cover screen are never touched. Subtitles and gestures stay with the video app and One UI.</string>
 

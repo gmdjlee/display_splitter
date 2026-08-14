@@ -1,5 +1,31 @@
 # On-device verification — Galaxy Z Fold7 / Fold8
 
+## Pending — 2026-08-15: spacer recents card kept + ambient widgets (needs a device pass)
+
+Two deliberate changes await on-device confirmation:
+
+1. **Picker discovery is now card-first.** The spacer is no longer excluded from
+   recents and every exit is a plain `finish()` (never `finishAndRemoveTask`), so its
+   task card survives and the partner picker's recent-tasks section lists it at MRU —
+   the search escalation should only ever run on a truly fresh install. Basis:
+   FoldWindow measured facts (DESIGN_27 G1: finish keeps the card and it reappears as
+   picker item #1; G3: tapping a dead card lands correctly in the split pane, same
+   task reused, no fullscreen steal). Re-verify the "Picker discovery" row: engage,
+   restore, engage again — the second engage must tap the card directly with no
+   search, and noticeably faster.
+2. **Ambient widgets in the spacer** (tap → tray: 시계/메모/검정 + 위치 전환/전체
+   화면). The restore row's label changed: 전체 화면으로 → **전체 화면** (tray chip).
+   Recents thumbnails are disabled for the spacer (`setRecentsScreenshotEnabled(false)`,
+   API 33+) so a typed memo never shows in recents/picker snapshots — confirm the
+   card renders with icon+label and the picker still matches it.
+
+Known trade-offs accepted with the card (re-check #9's "zero cover-screen footprint"
+wording): the "DS 스페이서" card is visible in recents on both displays; tapping it
+outside an engagement launches-and-finishes on the first frame (state collector).
+Tapping it inside the USER'S own manual split-select while the app is Idle dissolves
+that half-built split — same dead-end class that already existed via the picker's
+frequent-apps row, now merely more prominent.
+
 ## Results — 2026-08-13: FWA-ported Recents entry VERIFIED WORKING (SM-F966N, One UI 8.5)
 
 **Split initiation is solved.** The FoldWindow-style Recents automation was ported and

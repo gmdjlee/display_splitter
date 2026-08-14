@@ -8,15 +8,23 @@ import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import android.util.Log
 import com.displaysplitter.geometry.AspectRatio
 import com.displaysplitter.geometry.PositionPref
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.withContext
 
 private val Context.dataStore by preferencesDataStore(name = "settings")
+
+/** Hard cap on the spacer memo, enforced at write time and surfaced by the memo UI —
+ *  stops an unbounded text field from bloating the whole settings DataStore file. */
+const val SPACER_MEMO_MAX_CHARS = 4000
 
 data class TargetApp(val packageName: String, val labelFallback: String)
 
@@ -67,6 +75,36 @@ class SettingsRepository(private val context: Context, scope: CoroutineScope) {
         val ENABLED_APPS = stringSetPreferencesKey("enabled_apps")
         val BUBBLE_X = intPreferencesKey("bubble_x")
         val BUBBLE_Y = intPreferencesKey("bubble_y")
+        val SPACER_WIDGET = stringPreferencesKey("spacer_widget")
+        val SPACER_MEMO = stringPreferencesKey("spacer_memo")
+    }
+
+    // ---- spacer widget state -----------------------------------------------------------------
+    // Kept OUT of SettingsState on purpose: the memo re-saves on every debounced
+    // keystroke, and routing it through the app-wide state would re-emit settings.state
+    // (recombining bubbleVisible and the ratio observer) per keystroke for a value only
+    // the spacer window reads. Raw string out; SpacerWidgetMode.fromStorage maps it at
+    // the call site so this layer stays free of UI enums.
+
+    val spacerWidgetMode: Flow<String?> = context.dataStore.data.map { it[Keys.SPACER_WIDGET] }
+
+    val spacerMemo: Flow<String> = context.dataStore.data.map { it[Keys.SPACER_MEMO] ?: "" }
+
+    suspend fun setSpacerWidgetMode(mode: String) = context.dataStore.edit {
+        it[Keys.SPACER_WIDGET] = mode
+    }
+
+    /** True only when the write actually committed — the memo's save indicator reports
+     *  SAVED/FAILED honestly from this. NonCancellable: the debounce launch lives in the
+     *  spacer window's composition scope, which dies with the window; a write that has
+     *  STARTED must not be killed mid-commit (the ON_PAUSE flush only guarantees the
+     *  write begins, completion is guaranteed here). */
+    suspend fun saveSpacerMemo(text: String): Boolean = withContext(NonCancellable) {
+        runCatching {
+            context.dataStore.edit { it[Keys.SPACER_MEMO] = text.take(SPACER_MEMO_MAX_CHARS) }
+        }.onFailure {
+            Log.w("DisplaySplitter", "saveSpacerMemo failed", it)
+        }.isSuccess
     }
 
     val state: StateFlow<SettingsState> = context.dataStore.data

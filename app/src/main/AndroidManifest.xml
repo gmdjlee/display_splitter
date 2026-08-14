@@ -42,10 +42,16 @@
         </activity>
 
         <!-- The black companion pane. Separate task so it never pollutes the main task,
-             excluded from recents, resizeable for multi-window.
+             resizeable for multi-window.
              Exported with MAIN/LAUNCHER because the One UI split-screen partner picker
              only lists launcher-visible activities — the entry recipe taps this label
              there (SplitEntryDriver). The app-drawer icon is the accepted cost.
+             DELIBERATELY not excluded from recents: the leftover task card is what the
+             partner picker's recent-tasks section lists (MRU #1), so re-engages tap the
+             spacer directly instead of running the picker-search escalation. A dead
+             card (finished activities) still lands correctly in the split pane when
+             tapped — same task reused, no fullscreen steal (measured in FoldWindow,
+             DESIGN_27 G3). The recents card is the accepted cost, mirroring the icon.
              launchMode stays standard: singleTask would reuse a previous fullscreen
              task and destroy the split placement (measured in FoldWindow). -->
         <activity
@@ -53,7 +59,6 @@
             android:exported="true"
             android:label="@string/spacer_label"
             android:resizeableActivity="true"
-            android:excludeFromRecents="true"
             android:taskAffinity="com.displaysplitter.spacer"
             android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|density|uiMode|fontScale|locale|layoutDirection|keyboardHidden"
             android:theme="@style/Theme.DisplaySplitter.Spacer">

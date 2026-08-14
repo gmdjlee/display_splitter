@@ -229,11 +229,15 @@ class SplitEntryDriver(private val service: DividerAccessibilityService) {
 
             val node = pollForNode(minOf(PICKER_FIND_SLICE_MS, remaining())) { findPanelPickerNode(ctx) }
             if (node == null) {
-                // The picker's immediately-visible sections (recent tasks, frequent
-                // apps) won't contain our spacer on a fresh install, and the all-apps
-                // grid is paginated with only the current page in the a11y tree —
-                // page-hunting is unreliable. The picker's search is deterministic:
-                // tap it, SET_TEXT the label, and the result list holds the node.
+                // Primary discovery is the spacer's own recents card: the spacer exits
+                // with finish() (never finishAndRemoveTask) and is not excluded from
+                // recents, so after the first-ever engage the picker's recent-tasks
+                // section lists it at MRU and the find above hits without escalation.
+                // This branch is the fallback for a missing card (fresh install, user
+                // swiped it away): the all-apps grid is paginated with only the
+                // current page in the a11y tree — page-hunting is unreliable — but
+                // the picker's search is deterministic: tap it, SET_TEXT the label,
+                // and the result list holds the node.
                 if (!searchUsed) {
                     searchUsed = searchForPanel(ctx, minOf(SEARCH_BUDGET_MS, remaining()))
                     Log.i(TAG, "picker: cycle=$cycle search-escalation=$searchUsed")

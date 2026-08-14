@@ -4,78 +4,76 @@ import android.content.res.Configuration
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.core.tween
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.interaction.MutableInteractionSource
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.Icon
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Surface
-import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Close
-import com.displaysplitter.ui.AppIcons
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
-import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.unit.dp
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.lifecycleScope
 import com.displaysplitter.App
-import com.displaysplitter.R
 import com.displaysplitter.split.DividerAccessibilityService
 import com.displaysplitter.split.EngageState
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 /**
- * The pure-black companion pane. It exists only to occupy split-screen space:
- * visually it reads as bezel. A tap reveals two quiet actions for a few seconds.
+ * The black companion pane. It exists to occupy split-screen space — visually it reads
+ * as bezel — with an optional ambient widget (clock/memo) on top ([SpacerContent]).
+ * A tap reveals the mode switcher and split controls for a few seconds.
+ *
+ * Every exit is a plain finish(), never finishAndRemoveTask(): the leftover recents
+ * card is what the partner picker's recent-tasks section lists on the next engage, so
+ * the entry recipe taps the spacer directly instead of running the picker-search
+ * escalation. A dead card lands correctly back in the split pane when tapped — same
+ * task reused, no fullscreen steal (measured in FoldWindow, DESIGN_27 G1/G3). If the
+ * card IS gone (fresh install, user swiped it away), the search escalation in
+ * SplitEntryDriver still covers discovery.
  */
 class SpacerActivity : ComponentActivity() {
 
     private val controller get() = App.from(this).controller
+
+    /** Set once this instance's death has been reported to (or was caused by) the
+     *  controller. Activity destroy is asynchronous — it can land seconds after
+     *  finish(), inside the NEXT engagement — and an unconditional re-report from
+     *  onDestroy reset a live Engaging run (stale teardown killing a fresh entry) and
+     *  clobbered the fold re-engage bookkeeping with a fresh, now-wrong foldedShut.
+     *  onDestroy stays the catch-all only for genuinely unreported deaths (e.g. the
+     *  task swiped away with no multi-window callback delivered). */
+    private var stopReported = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         // Zero cover-screen footprint: if we are ever (re)created off the inner
         // display — process-death restore on the cover screen — vanish immediately.
         if (onCoverDisplay()) {
-            finishAndRemoveTask()
+            finish()
             return
         }
         WindowCompat.setDecorFitsSystemWindows(window, false)
         hideSystemBars()
+        // The recents card is deliberately kept (see the manifest), but its thumbnail
+        // must not be: the pane can hold a user-written memo, and the snapshot would
+        // quietly display it in recents on BOTH displays and in the partner picker.
+        // The thumbnail of a near-black pane carries no value anyway.
+        if (android.os.Build.VERSION.SDK_INT >= 33) setRecentsScreenshotEnabled(false)
 
         // The controller's state is the single authority: whenever it is not
         // engaged/engaging (disengage, failure, service loss, process-death restore
-        // against a fresh Idle controller), this window has no reason to exist.
-        // A StateFlow makes late subscription safe — nothing can be missed.
+        // against a fresh Idle controller), this window has no reason to exist. This
+        // also covers a recents-card tap outside an engagement: the fullscreen
+        // intruder finishes on its first frame. A StateFlow makes late subscription
+        // safe — nothing can be missed. The controller is already in the state this
+        // finish reflects, so the death needs no report — flag it before finishing.
         lifecycleScope.launch {
             controller.state.collect { st ->
-                if (st is EngageState.Idle || st is EngageState.Failed) finishAndRemoveTask()
+                if (st is EngageState.Idle || st is EngageState.Failed) {
+                    stopReported = true
+                    finish()
+                }
             }
         }
 
         setContent {
             SpacerContent(
+                settings = App.from(this).settings,
                 onFlip = { controller.flipVideoSide() },
                 onExit = { controller.disengage() },
             )
@@ -89,8 +87,9 @@ class SpacerActivity : ComponentActivity() {
         // smallestScreenWidthDp is pane-sized (<600dp on the inner display too) — using it
         // here killed the spacer on every pane resize (measured).
         if (onCoverDisplay()) {
+            stopReported = true
             controller.onSpacerStopped(foldedShut = true)
-            finishAndRemoveTask()
+            finish()
             return
         }
         controller.onSpacerBoundsChanged()
@@ -103,18 +102,21 @@ class SpacerActivity : ComponentActivity() {
         // screen). foldedShut comes from newConfig — callback ordering between this
         // and onConfigurationChanged during a fold is not guaranteed.
         if (!isInMultiWindowMode) {
+            stopReported = true
             controller.onSpacerStopped(
                 foldedShut = newConfig.smallestScreenWidthDp <
                     DividerAccessibilityService.INNER_DISPLAY_MIN_SW_DP
             )
-            finishAndRemoveTask()
+            finish()
         }
     }
 
     override fun onDestroy() {
         // A pure configuration recreation (locale, font scale) must not tear down a
         // live engagement — the recreated instance re-binds to controller.state.
-        if (!isChangingConfigurations) {
+        // Already-reported deaths stay silent: this destroy can arrive DURING the
+        // next engagement, and a stale report here tore that engagement down.
+        if (!isChangingConfigurations && !stopReported) {
             controller.onSpacerStopped(foldedShut = onCoverDisplay())
         }
         super.onDestroy()
@@ -134,74 +136,5 @@ class SpacerActivity : ComponentActivity() {
         controller.systemBarsBehavior =
             WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
         controller.hide(WindowInsetsCompat.Type.systemBars())
-    }
-}
-
-@androidx.compose.runtime.Composable
-private fun SpacerContent(onFlip: () -> Unit, onExit: () -> Unit) {
-    var controlsVisible by remember { mutableStateOf(false) }
-
-    // Auto-hide the controls shortly after they are revealed.
-    LaunchedEffect(controlsVisible) {
-        if (controlsVisible) {
-            delay(4_000)
-            controlsVisible = false
-        }
-    }
-
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(Color.Black)
-            .clickable(
-                interactionSource = remember { MutableInteractionSource() },
-                indication = null,
-            ) { controlsVisible = !controlsVisible },
-        contentAlignment = Alignment.Center,
-    ) {
-        AnimatedVisibility(
-            visible = controlsVisible,
-            enter = fadeIn(tween(180)),
-            exit = fadeOut(tween(320)),
-        ) {
-            Surface(
-                shape = RoundedCornerShape(26.dp),
-                color = Color(0xFF17171B),
-                contentColor = Color.White,
-            ) {
-                Row(
-                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
-                    horizontalArrangement = Arrangement.spacedBy(4.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    TextButton(onClick = onFlip) {
-                        Icon(
-                            AppIcons.Swap,
-                            contentDescription = null,
-                            tint = Color.White,
-                            modifier = Modifier.padding(end = 6.dp),
-                        )
-                        Text(
-                            text = androidx.compose.ui.res.stringResource(R.string.spacer_flip),
-                            color = Color.White,
-                            style = MaterialTheme.typography.labelLarge,
-                        )
-                    }
-                    TextButton(onClick = onExit) {
-                        Icon(
-                            Icons.Filled.Close,
-                            contentDescription = null,
-                            tint = Color.White,
-                            modifier = Modifier.padding(end = 6.dp),
-                        )
-                        Text(
-                            text = androidx.compose.ui.res.stringResource(R.string.spacer_exit),
-                            color = Color.White,
-                            style = MaterialTheme.typography.labelLarge,
-                        )
-                    }
-                }
-            }
-        }
     }
 }
