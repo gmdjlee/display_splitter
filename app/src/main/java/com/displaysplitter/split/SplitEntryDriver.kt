@@ -563,7 +563,7 @@ class SplitEntryDriver(private val service: DividerAccessibilityService) {
         const val TAG = "DisplaySplitter"
 
         const val STEP_COUNT = 2
-        const val POLL_INTERVAL_MS = 150L
+        const val POLL_INTERVAL_MS = 75L
         // 4s was measured too tight: split-select transitions can settle after the
         // remaining budget. 6s × 2 attempts (with success-precheck absorption)
         // matches FoldWindow's retry design.

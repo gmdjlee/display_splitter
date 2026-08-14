@@ -22,6 +22,7 @@ import androidx.core.app.NotificationCompat
 import com.displaysplitter.App
 import com.displaysplitter.R
 import com.displaysplitter.split.DividerAccessibilityService
+import com.displaysplitter.split.EngageState
 import com.displaysplitter.split.Posture
 import com.displaysplitter.ui.MainActivity
 import kotlinx.coroutines.CoroutineScope
@@ -88,24 +89,34 @@ class OverlayService : Service() {
         scope.launch {
             combine(
                 controller.bubbleVisible, controller.onInnerDisplay, controller.posture,
-            ) { visible, inner, posture -> Triple(visible, inner, posture) }
-                .collect { (visible, inner, posture) ->
-                    hideJob?.cancel()
-                    when {
-                        // Cover screen / Flex mode: vanish NOW — no debounce. The cover
-                        // display is none of our business, ever.
-                        !inner || posture == Posture.HALF_OPENED -> detachOverlay()
-                        visible -> attachOverlay()
-                        else -> {
-                            // Debounce ordinary hides: transient foreground flips (recents,
-                            // switching between two video apps) must not blink the bubble.
-                            hideJob = scope.launch {
-                                delay(HIDE_DEBOUNCE_MS)
-                                detachOverlay()
-                            }
+                controller.state,
+            ) { visible, inner, posture, engage ->
+                when {
+                    // Cover screen / Flex mode: vanish NOW — no debounce. The cover
+                    // display is none of our business, ever. Engaging too: gesture
+                    // injection is imminent, and our touchable window on the finger's
+                    // hit-test path would swallow it (EngagementController waits only
+                    // OVERLAY_HIDE_SETTLE_MS on the immediate detach).
+                    !inner || posture == Posture.HALF_OPENED -> HideMode.NOW
+                    engage is EngageState.Engaging -> HideMode.NOW
+                    visible -> HideMode.SHOW
+                    // Debounce ordinary hides: transient foreground flips (recents,
+                    // switching between two video apps) must not blink the bubble.
+                    else -> HideMode.DEBOUNCED
+                }
+            }.collect { mode ->
+                hideJob?.cancel()
+                when (mode) {
+                    HideMode.NOW -> detachOverlay()
+                    HideMode.SHOW -> attachOverlay()
+                    HideMode.DEBOUNCED -> {
+                        hideJob = scope.launch {
+                            delay(HIDE_DEBOUNCE_MS)
+                            detachOverlay()
                         }
                     }
                 }
+            }
         }
         scope.launch {
             settings.state.collect { s ->
@@ -361,6 +372,8 @@ class OverlayService : Service() {
 
     private fun dp(value: Int): Int =
         (value * overlayContext.resources.displayMetrics.density).roundToInt()
+
+    private enum class HideMode { SHOW, NOW, DEBOUNCED }
 
     companion object {
         private const val NOTIFICATION_ID = 10

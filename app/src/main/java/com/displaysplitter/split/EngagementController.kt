@@ -123,9 +123,10 @@ class EngagementController(
                 if (engageJob?.isActive == true) return@collect
                 if (RatioMath.isWithinTolerance(st.achievedRatio, ratio)) return@collect
                 engageJob = scope.launch {
-                    // Engaging force-hides the overlay window; wait out the hide debounce
-                    // (250ms) before injecting — the drag takes the finger's hit-test path
-                    // and the still-open quick panel would swallow it (see bubbleVisible).
+                    // Engaging detaches the overlay immediately (OverlayService skips its
+                    // hide debounce for this state); the short wait covers flow propagation
+                    // + removeViewImmediate — the drag takes the finger's hit-test path and
+                    // a still-attached quick panel would swallow it (see bubbleVisible).
                     _state.value = EngageState.Engaging(st.packageName)
                     delay(OVERLAY_HIDE_SETTLE_MS)
                     // Only adjust a split that is visibly intact (e.g. the settings screen
@@ -304,6 +305,10 @@ class EngagementController(
             val newSide = st.plan.videoSide.opposite()
             val newPref = if (newSide == PaneSide.FIRST) PositionPref.FIRST else PositionPref.SECOND
             val ratio = settings.state.value.ratio ?: return@launch
+            // Same overlay discipline as every other injection path: Engaging detaches
+            // the bubble immediately; wait out the propagation before tapping the divider.
+            _state.value = EngageState.Engaging(st.packageName)
+            delay(OVERLAY_HIDE_SETTLE_MS)
             // The fresh pref is passed directly — never round-tripped through the
             // DataStore StateFlow, whose propagation is not ordered with this coroutine.
             adjustToPlan(service, st.packageName, ratio, retriesLeft = 1, positionPrefOverride = newPref)
@@ -331,16 +336,23 @@ class EngagementController(
             ?: return fail(FailReason.NO_TARGET_APP)
 
         _state.value = EngageState.Engaging(pkg)
+        // Engaging detaches the overlay immediately (OverlayService); wait out the flow
+        // propagation + removeViewImmediate before ANY injection below — our own
+        // touchable window on the finger's hit-test path would swallow the gestures.
+        delay(OVERLAY_HIDE_SETTLE_MS)
 
         // 1. Ensure a split containing the video and our spacer exists. Initiation =
         //    injected two-finger bottom→top swipe (One UI's multi-window split gesture)
         //    on the foreground video app, then a picker tap (SplitEntryDriver) —
         //    TOGGLE_SPLIT_SCREEN was removed from the framework and LAUNCH_ADJACENT is
         //    ignored for background callers (verified on device).
-        //    Settled read: One UI's embedded divider window flickers out of the a11y
-        //    windows list, and a single missed read here would re-run the whole entry
-        //    over a perfectly good split.
-        var snap = settledPanes(service, pkg)
+        //    Settled read only when our spacer is already up: One UI's embedded divider
+        //    window flickers out of the a11y windows list during animations, and a single
+        //    missed read would re-run the whole entry over a perfectly good split. On a
+        //    fresh engage (no spacer window) the divider cannot exist — polling for it
+        //    would burn the whole settle budget before the swipe even starts.
+        var snap = service.panes(pkg)
+        if (snap?.spacer != null && snap.divider == null) snap = settledPanes(service, pkg)
         if (snap?.divider == null || snap.spacer == null || snap.video == null) {
             val entered = SplitEntryDriver(service)
                 .enterSplit(pkg, revealBarsFirst = !statusBarsVisible)
@@ -456,7 +468,7 @@ class EngagementController(
         val from = Point(fresh.centerX(), fresh.centerY())
         val to = Point(fresh.centerX(), plan.dividerCenterPx + compensationPx)
         val dragged = service.dragDivider(from, to)
-        delay(DRAG_SETTLE_MS)
+        awaitDragSettle(service, pkg, current.video)
         if (abortRequested(service)) return
 
         // Verify against what the system actually gave us (snap points may differ).
@@ -494,6 +506,27 @@ class EngagementController(
         }
         coroutineContext.ensureActive()
         _state.value = EngageState.Engaged(pkg, plan, achieved, videoPane)
+    }
+
+    /** Post-drag settle: floor for the snap animation, then exit as soon as the video
+     *  pane bounds have moved off [before] and held still for one poll. Bounds that
+     *  never move (no-op drag, or a11y bounds that only update at animation end) fall
+     *  back to the full fixed budget — an early stale read would feed the retry a
+     *  wrong compensation value. */
+    private suspend fun awaitDragSettle(
+        service: DividerAccessibilityService,
+        pkg: String,
+        before: Rect?,
+    ) {
+        delay(DRAG_SETTLE_FLOOR_MS)
+        val deadline = SystemClock.uptimeMillis() + DRAG_SETTLE_MS - DRAG_SETTLE_FLOOR_MS
+        var prev: Rect? = null
+        while (SystemClock.uptimeMillis() < deadline) {
+            val cur = service.panes(pkg)?.video
+            if (cur != null && cur != before && cur == prev) return
+            prev = cur
+            delay(POLL_MS)
+        }
     }
 
     /** Polls briefly for a snapshot whose divider is present — the divider window can
@@ -550,20 +583,26 @@ class EngagementController(
     private companion object {
         const val TAG = "DisplaySplitter"
         const val SYSTEM_UI = "com.android.systemui"
-        const val POLL_MS = 150L
+        const val POLL_MS = 75L
         const val POST_ENTRY_SETTLE_MS = 3_000L
         const val SWAP_POPUP_TIMEOUT_MS = 4_000L
         const val ROTATE_TIMEOUT_MS = 5_000L
-        const val SWAP_SETTLE_MS = 650L
+        // Popup-dismiss tail only: swapPanes' settled predicate has already verified the
+        // final side, and settledPanes re-polls right after.
+        const val SWAP_SETTLE_MS = 150L
+        // Cap for the post-drag settle poll (awaitDragSettle); the floor guards against
+        // reading bounds before the snap animation starts reporting.
         const val DRAG_SETTLE_MS = 600L
+        const val DRAG_SETTLE_FLOOR_MS = 150L
         const val BOUNDS_SETTLE_MS = 250L
-        // Covers OverlayService's 250ms hide debounce + removeViewImmediate, with margin.
-        const val OVERLAY_HIDE_SETTLE_MS = 600L
+        // Engaging detaches the overlay with NO debounce (OverlayService): this only
+        // covers flow propagation to the collector + removeViewImmediate.
+        const val OVERLAY_HIDE_SETTLE_MS = 150L
         const val REENGAGE_DEBOUNCE_MS = 800L
         const val DISENGAGE_GRACE_MS = 1_500L
         const val REENGAGE_WINDOW_MS = 60_000L
         // 1.5s worth of polls: the divider window leaves the a11y windows list for the
         // whole duration of swap/commit animations, not just a frame (measured).
-        const val DIVIDER_SETTLE_POLLS = 10
+        const val DIVIDER_SETTLE_POLLS = 20
     }
 }
