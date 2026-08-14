@@ -237,6 +237,7 @@ class OverlayService : Service() {
             .onSuccess {
                 overlayRoot = root
                 overlayLifecycle = lifecycle
+                controller.overlayAttached.value = true
             }
             .onFailure { lifecycle.destroy() }
     }
@@ -248,6 +249,9 @@ class OverlayService : Service() {
         overlayLifecycle?.destroy()
         overlayRoot = null
         overlayLifecycle = null
+        // Handshake for EngagementController.awaitOverlayDetached: flipped only after
+        // removeViewImmediate returned, so injections gated on it can't hit our window.
+        controller.overlayAttached.value = false
         // Persist only the true bubble anchor: snapToEdge already saves the settled
         // position after every drag, so the only value worth saving here is the
         // pre-expand anchor while the panel was open. Saving the live p.x would

@@ -118,17 +118,27 @@ class SplitEntryDriver(private val service: DividerAccessibilityService) {
         val deadline = SystemClock.uptimeMillis() + timeoutMs
         fun remaining() = (deadline - SystemClock.uptimeMillis()).coerceAtLeast(0)
 
-        val divider = dividerBounds()
-        if (divider == null) {
-            Log.w(TAG, "dividerPopupAction[$what]: divider window not found")
-            return false
+        // Tap the handle, then give the popup one slice to produce a clickable item.
+        // A swallowed handle tap leaves no popup to ever find — a single tap followed
+        // by a full-budget poll burned the whole timeout on nothing (recorded flake),
+        // so re-tap once per slice instead; popup-open is near-instant when the tap
+        // lands. If the popup IS open but the item eludes the search, the re-tap may
+        // toggle it closed/open — bounded by the same budget, never worse than before.
+        var clicked = false
+        while (!clicked && remaining() > 0) {
+            val divider = dividerBounds()
+            if (divider == null) {
+                Log.w(TAG, "dividerPopupAction[$what]: divider window not found")
+                return false
+            }
+            // The a11y divider bounds ARE the drag handle on One UI (measured 221×54):
+            // tapping its center opens the handle popup.
+            if (!service.tapPoint(divider.centerX(), divider.centerY())) {
+                Log.w(TAG, "dividerPopupAction[$what]: handle tap rejected — polling for popup anyway")
+            }
+            clicked = clickWhenFound(minOf(POPUP_FIND_SLICE_MS, remaining()), what, find)
         }
-        // The a11y divider bounds ARE the drag handle on One UI (measured 221×54):
-        // tapping its center opens the handle popup.
-        if (!service.tapPoint(divider.centerX(), divider.centerY())) {
-            Log.w(TAG, "dividerPopupAction[$what]: handle tap rejected — polling for popup anyway")
-        }
-        if (!clickWhenFound(remaining(), what, find)) return false
+        if (!clicked) return false
         return pollUntil(remaining(), settled)
     }
 
@@ -590,6 +600,10 @@ class SplitEntryDriver(private val service: DividerAccessibilityService) {
         const val REVEAL_TRAVEL_PX = 180
         const val REVEAL_SWIPE_MS = 120L
         const val REVEAL_SETTLE_MS = 450L
+        // One slice of "find + click the divider-popup item" before re-tapping the
+        // handle: the popup opens near-instantly when the tap lands, so a dry slice
+        // means the tap was swallowed.
+        const val POPUP_FIND_SLICE_MS = 800L
         const val PICKER_TIMEOUT_MS = 10_000L
         const val SEARCH_BUDGET_MS = 2_500L
         const val PICKER_CLICK_CYCLES = 3
