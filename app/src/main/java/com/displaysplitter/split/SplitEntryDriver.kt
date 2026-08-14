@@ -77,10 +77,13 @@ class SplitEntryDriver(private val service: DividerAccessibilityService) {
                 Log.w(TAG, "enterSplit: step $step attempt $attempt failed")
             }
             if (!ok) {
-                // A step-1 failure changed nothing on screen (the swipe was ignored) —
-                // injecting BACK there would poke the user's fullscreen app. Only later
-                // steps leave split-select/picker UI up that one BACK dismisses.
-                if (step > 1) {
+                logWindowsSnapshot("step-$step-failed")
+                // A step-1 failure normally changed nothing on screen (the swipe was
+                // ignored) — injecting BACK there would poke the user's fullscreen app.
+                // Exception: a picker left visible means split-select DID open but our
+                // detection missed it (measured variant) — one BACK dismisses it. Later
+                // steps always leave split-select/picker UI up that one BACK dismisses.
+                if (step > 1 || isPickerWindowVisible()) {
                     runCatching {
                         service.performGlobalAction(
                             android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_BACK,
@@ -285,13 +288,69 @@ class SplitEntryDriver(private val service: DividerAccessibilityService) {
      * so the divider window — which only exists once a split is committed, never in
      * split-select — must be absent; otherwise re-entry over an existing
      * [video, other-app] split would false-positive here and skip the swipe entirely.
+     *
+     * Structural fallback: One UI has a split-select variant (FromRecent picker,
+     * measured) that floats the docked pane as an inset card ~100px off the screen
+     * edge — past EDGE_DOCK_TOLERANCE, so every geometry predicate fails and a real
+     * split-select went undetected (engage failed with the picker left on screen).
+     * The partner picker itself is the reliable signal: a large launcher window is
+     * occluded (absent from the a11y windows list) behind a fullscreen app, so
+     * "no divider + big launcher window + target window still present" is
+     * split-select regardless of how the docked pane is decorated. The target-window
+     * requirement keeps a stray HOME/recents transition (launcher large, target gone)
+     * from false-positiving.
      */
     private fun isTargetInSplitSelect(ctx: EntryContext): Boolean =
-        dividerBounds() == null && targetWindowMatches(ctx) { pane, screen ->
-            PaneGeometry.isSplitSelectTopPane(pane, screen) ||
-                PaneGeometry.isSplitSelectBottomPane(pane, screen) ||
-                PaneGeometry.isSplitSelectSidePane(pane, screen)
+        dividerBounds() == null && (
+            targetWindowMatches(ctx) { pane, screen ->
+                PaneGeometry.isSplitSelectTopPane(pane, screen) ||
+                    PaneGeometry.isSplitSelectBottomPane(pane, screen) ||
+                    PaneGeometry.isSplitSelectSidePane(pane, screen)
+            } ||
+                (isPickerWindowVisible() && isTargetWindowVisible(ctx))
+            )
+
+    /** A launcher window covering ≥25% of the screen area — the partner picker (or
+     *  split-select's app grid). Orientation-agnostic on purpose: the picker is a
+     *  half-screen pane in either axis. Taskbar/edge-panel launcher windows are far
+     *  smaller; the fullscreen home/recents case is excluded by the caller's
+     *  target-window check. */
+    private fun isPickerWindowVisible(): Boolean {
+        val screen = screenBox()
+        val windows = runCatching { service.windows }.getOrDefault(emptyList())
+        return windows.any { w ->
+            runCatching {
+                if (w.root?.packageName?.toString() != LAUNCHER_PACKAGE) return@runCatching false
+                val visible = PaneGeometry.visibleRect(
+                    Rect().also { w.getBoundsInScreen(it) }.toBox(), screen,
+                ) ?: return@runCatching false
+                visible.width.toLong() * visible.height >=
+                    (screen.width.toLong() * screen.height * PICKER_MIN_AREA_FRACTION).toLong()
+            }.getOrDefault(false)
         }
+    }
+
+    /** The target app still owns a visible application window (any bounds). */
+    private fun isTargetWindowVisible(ctx: EntryContext): Boolean =
+        runCatching { service.windows }.getOrDefault(emptyList()).any { w ->
+            runCatching {
+                w.type == AccessibilityWindowInfo.TYPE_APPLICATION &&
+                    w.root?.packageName?.toString() == ctx.targetPackage
+            }.getOrDefault(false)
+        }
+
+    /** One-line dump of the a11y windows list — logged when an entry step fails so a
+     *  detection miss leaves the actual geometry behind instead of a guess. */
+    private fun logWindowsSnapshot(what: String) {
+        val summary = runCatching { service.windows }.getOrDefault(emptyList())
+            .joinToString(separator = " | ") { w ->
+                runCatching {
+                    val b = Rect().also { w.getBoundsInScreen(it) }
+                    "t${w.type}:${w.root?.packageName}:$b"
+                }.getOrDefault("?")
+            }
+        Log.w(TAG, "windows[$what] screen=${screenBox()}: $summary")
+    }
 
     private fun collectPairState(ctx: EntryContext): Triple<Boolean, Boolean, List<Box>> {
         val windows = runCatching { service.windows }.getOrDefault(emptyList())
@@ -615,6 +674,10 @@ class SplitEntryDriver(private val service: DividerAccessibilityService) {
 
         const val MAX_TREE_DEPTH = 50
         const val MAX_NODES_VISITED = 4_000
+
+        // Partner-picker window: measured ~45-50% of the screen; taskbar/edge panels
+        // are <5%, so 25% cleanly separates them.
+        const val PICKER_MIN_AREA_FRACTION = 0.25f
 
         const val LAUNCHER_PACKAGE = "com.sec.android.app.launcher"
 
