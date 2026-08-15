@@ -79,8 +79,10 @@ class DividerAccessibilityService : AccessibilityService() {
         // and other system windows fire these events too and must not masquerade as an
         // app switch).
         if (type != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return
+        // Our own package is NOT filtered here: the controller owns that policy, and it
+        // needs the event — closing the settings screen focuses the spacer, which is the
+        // only signal that the split is uncovered again (measured).
         val pkg = activeAppPackage() ?: return
-        if (pkg == packageName) return
         controller.onForegroundPackage(pkg)
     }
 

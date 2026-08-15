@@ -250,8 +250,13 @@ class SplitEntryDriver(private val service: DividerAccessibilityService) {
                 Log.w(TAG, "picker: cycle=$cycle stale node")
                 continue
             }
-            // gesture, gesture, then a11y-click as the final rung
-            val dispatched = if (cycle < PICKER_CLICK_CYCLES - 1) {
+            // gesture, gesture, then a11y-click as the final rung — EXCEPT once the
+            // search overlay is up: its result item is not touchable yet while the
+            // overlay animates in, so a gesture at the right coordinates falls THROUGH
+            // to the app grid beneath and docks the WRONG app (measured on One UI 9:
+            // HoneySpace logged onItemClick for the calculator 60ms after our tap).
+            // Node-identity routing cannot land on a neighbour, so it goes first there.
+            val dispatched = if (cycle < PICKER_CLICK_CYCLES - 1 && !searchUsed) {
                 tapNodeCenter(node)
             } else {
                 val clickable = clickableAncestorOrSelf(node)

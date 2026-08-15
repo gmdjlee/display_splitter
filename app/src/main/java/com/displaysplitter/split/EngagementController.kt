@@ -257,7 +257,15 @@ class EngagementController(
     }
 
     fun onForegroundPackage(pkg: String) {
-        if (pkg == context.packageName) return
+        if (pkg == context.packageName) {
+            // Closing our own settings screen re-reveals the split, but the pane that
+            // takes focus is the SPACER, not the video (measured: mCurrentFocus =
+            // SpacerActivity) — so the isVideo branch below never runs and a change
+            // skipped while the divider was covered stayed pending until the user
+            // happened to touch the video pane. This is that missing signal.
+            (_state.value as? EngageState.Engaged)?.let { retryPendingAdjust(it) }
+            return
+        }
         _foregroundPackage.value = pkg
         val s = settings.state.value
         val isVideo = pkg in s.enabledApps

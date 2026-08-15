@@ -1,5 +1,68 @@
 # On-device verification — Galaxy Z Fold7 / Fold8
 
+## Results — 2026-08-15 (3): FIRST PASS ON **Fold8** (SM-F976N, Android 17 / One UI 9.0)
+
+New hardware and a new OS major: inner display **2256×2504** (Fold7 was 1968×2184),
+density 480 (override 420), inner display id `4630946722019192211` (screencap `-d`),
+cover 1080×2520. One UI 9 offers **top/bottom split directly** (`ShellSplitScreen:
+AppsVertical? true`) — no rotate step. Everything below was ADB-driven on a fresh
+install; the app had never run on this device.
+
+**Verdict: the whole pipeline works on Fold8/One UI 9, and two real defects were found
+and fixed here.**
+
+| # | Check | Result |
+|---|---|---|
+| 1 | Bubble over a video app | ✅ YouTube + Netflix both attach |
+| 2 | Apply → split, no letterbox | ✅ video pane fills edge-to-edge (see below for ratio accuracy) |
+| 4 | 위치 전환 flip | ✅ 0.47s via 창 전환, ratio preserved; achieved side written back to the chip (자동→위) |
+| 5 | Live ratio change while engaged | ✅ 16:9→21:9 in ~2s landing **2.3354 exact=true**; 4:3 **1.3341 exact**; 16:9 **1.7792 exact** |
+| 6 | Restore 전체 화면 | ✅ split dissolves, spacer window count 0, video fullscreen |
+| 7 | Netflix | ✅ engages from **immersive DRM playback** (revealBars path) in 3.63s |
+| — | Card-first picker discovery | ✅ `picker: cycle=0 dispatched=true`, engage **3.3–3.7s** |
+| — | Fresh-install search escalation | ✅ after the fix below, engage **5.09s** |
+| — | Settings screen over the split | ✅ opens fullscreen without tearing the split down |
+| 8–10 | fold / flex / cover screen | ⏳ still needs hands |
+
+### Defect 1 — the picker docked the WRONG APP (fixed)
+
+On the fresh-install search path the driver typed `DS 스페이서`, matched a node 170ms
+later and gesture-tapped it — and One UI docked the **calculator**. Evidence:
+`HoneySpace.FromRecent.ViewModel: onItemClick cn=…popupcalculator` 60ms after our tap.
+The search overlay's result item is not touchable yet while it animates in, so the
+gesture falls **through** to the app grid underneath, which still holds the suggested
+apps (`FilteredItemProvider: [youtube, popupcalculator, displaysplitter, settings]`).
+
+Fix: `SplitEntryDriver.stepTapPanelInPicker` uses **a11y ACTION_CLICK first once
+`searchUsed`** (node-identity routing cannot land on a neighbour); gesture-first is kept
+for the recents-card path where ACTION_CLICK was measured to no-op. Re-verified after
+`pm clear`: `onItemClick cn=…SpacerActivity` on the first post-search cycle.
+
+### Defect 2 — settings-screen change never re-applied (fixed)
+
+Changing 영상 위치 on the settings screen while engaged skipped correctly (divider
+covered → `pendingAdjust`), but returning to the video **never applied it** — the pref
+sat stored as `SECOND` while the video stayed on top, until the user happened to tap the
+video pane. Root cause: closing the settings screen focuses **our own spacer**
+(`mCurrentFocus=SpacerActivity`), and `DividerAccessibilityService` dropped every
+own-package event before the controller could see it, so `retryPendingAdjust` had no
+trigger.
+
+Fix: the service no longer filters its own package (the controller already owns that
+policy), and `EngagementController.onForegroundPackage` retries a pending adjust on an
+own-package event. Re-verified: BACK from settings, no touch on the video → swap +
+`engaged: achieved=2.3354037 exact=true` in ~3.5s (including one divider-popup re-tap).
+
+### Open finding — entry lands 2–4% off, a live re-tap lands exact
+
+Every *entry* on this device settled outside the 2% tolerance for 16:9 — 1.8135 /
+1.8446 / 1.7488 (`exact=false`, reported honestly) — while a *live* ratio re-tap on the
+same split converged to **1.7792 exact=true**. So the snap grid is not the limit. Most
+likely `retriesLeft = 1` is shared: on entry the post-swap settle consumes the retry via
+the `!sideOk` branch, leaving none for the ratio compensation (both branches are silent,
+so this is unconfirmed). Next step: log which retry branch fires, then consider a
+separate compensation budget for the entry path.
+
 ## Results — 2026-08-15 (2): live 영상 위치 change while engaged VERIFIED (SM-F966N)
 
 Changing the panel's 영상 위치 chip mid-engagement now re-applies immediately (the
