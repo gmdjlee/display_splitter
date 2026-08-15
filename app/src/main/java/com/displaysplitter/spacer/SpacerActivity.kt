@@ -92,7 +92,7 @@ class SpacerActivity : ComponentActivity() {
             finish()
             return
         }
-        controller.onSpacerBoundsChanged()
+        controller.onGeometryChanged()
     }
 
     override fun onMultiWindowModeChanged(isInMultiWindowMode: Boolean, newConfig: Configuration) {

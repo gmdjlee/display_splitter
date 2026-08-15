@@ -113,6 +113,46 @@ class RatioMathTest {
     }
 
     @Test
+    fun `the hole follows the display rotation`() {
+        // Fold8 inner panel, natural (portrait) 2256×2504, hole measured off
+        // `dumpsys window displays` udcCutout. Rotating it must land the hole where the
+        // framework would have put a real cutout, and flip the video pane with it.
+        val natural = Box(1665, 22, 1747, 104)
+        val (w, h) = 2256 to 2504
+
+        val at0 = RatioMath.rotateBox(natural, w, h, 0)
+        assertEquals(natural, at0)
+        assertEquals(PaneSide.SECOND, RatioMath.resolveVideoSide(h, listOf(at0), PositionPref.AUTO))
+
+        // 180°: same display size, hole now along the BOTTOM edge — the case the old
+        // "no cutout data → hole on top" default got wrong.
+        val at180 = RatioMath.rotateBox(natural, w, h, 2)
+        assertEquals(Box(509, 2400, 591, 2482), at180)
+        assertEquals(PaneSide.FIRST, RatioMath.resolveVideoSide(h, listOf(at180), PositionPref.AUTO))
+
+        // 90°/270°: display is now w=2504 h=2256 and the hole sits on a side edge, so
+        // which half it lands in depends on its offset along the natural top edge.
+        val at90 = RatioMath.rotateBox(natural, w, h, 1)
+        assertEquals(Box(22, 509, 104, 591), at90)
+        assertEquals(PaneSide.SECOND, RatioMath.resolveVideoSide(w, listOf(at90), PositionPref.AUTO))
+
+        val at270 = RatioMath.rotateBox(natural, w, h, 3)
+        assertEquals(Box(2400, 1665, 2482, 1747), at270)
+        assertEquals(PaneSide.FIRST, RatioMath.resolveVideoSide(w, listOf(at270), PositionPref.AUTO))
+
+        // Every rotation stays inside the rotated display.
+        listOf(at0 to (w to h), at90 to (h to w), at180 to (w to h), at270 to (h to w))
+            .forEach { (box, size) ->
+                assertTrue(
+                    "$box outside $size",
+                    box.left in 0..size.first && box.right in 0..size.first &&
+                        box.top in 0..size.second && box.bottom in 0..size.second &&
+                        box.left < box.right && box.top < box.bottom,
+                )
+            }
+    }
+
+    @Test
     fun `explicit prefs override the hole`() {
         assertEquals(PaneSide.FIRST, RatioMath.resolveVideoSide(landH, topHole, PositionPref.FIRST))
         assertEquals(PaneSide.SECOND, RatioMath.resolveVideoSide(landH, topHole, PositionPref.SECOND))

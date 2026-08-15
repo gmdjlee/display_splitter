@@ -109,11 +109,12 @@ class EngagementController(
      *  event instead of being silently dropped. */
     private var pendingAdjust = false
 
-    /** Display bounds the current engagement was planned against. A later pane-bounds
-     *  event reporting DIFFERENT bounds means the device rotated (the only thing that
-     *  changes display size mid-engagement), which invalidates the plan — see
-     *  [onSpacerBoundsChanged]. */
+    /** Display bounds and rotation the current engagement was planned against. Either
+     *  changing means the device rotated, which invalidates the plan: the bounds catch
+     *  90°/270° (the axes swap), the rotation catches the 180° flip that keeps the size
+     *  but moves the camera hole to the other pane — see [onGeometryChanged]. */
     private var plannedDisplay: Rect? = null
+    private var plannedRotation: Int? = null
 
     /**
      * Status-bar visibility sampled from the overlay window's insets (OverlayService).
@@ -188,7 +189,7 @@ class EngagementController(
                 _state.value = st
                 // st predates the suspensions above and bounds events are suppressed
                 // while Engaging: re-measure in case the divider moved meanwhile.
-                onSpacerBoundsChanged()
+                onGeometryChanged()
                 return@launch
             }
             pendingAdjust = false
@@ -350,7 +351,9 @@ class EngagementController(
         }
     }
 
-    fun onSpacerBoundsChanged() {
+    /** Something about the split geometry may have changed — a divider drag (spacer pane
+     *  bounds) or a display rotation (DividerAccessibilityService's DisplayListener). */
+    fun onGeometryChanged() {
         // The user (or the system) moved the divider while engaged: re-measure and
         // report honestly instead of fighting the user's drag.
         if (_state.value !is EngageState.Engaged) return
@@ -365,17 +368,27 @@ class EngagementController(
             // length that held the target ratio no longer does (and One UI may have
             // re-laid the split out side-by-side). Re-plan for the new geometry instead
             // of recording the now-wrong ratio as fact. A bounds change at the SAME
-            // display size is the user's own divider drag — never fought, only measured.
-            // Can't re-apply right now (ratio off, adjust in flight)? Fall through to the
-            // honest re-measure below and leave plannedDisplay stale so the next bounds
-            // event tries again.
+            // display size and rotation is the user's own divider drag — never fought,
+            // only measured. The rotation is checked separately because a 180° flip
+            // changes neither the display size nor the pane bounds, yet it moves the
+            // camera hole to the opposite pane. Can't re-apply right now (ratio off,
+            // adjust in flight)? Fall through to the honest re-measure below and leave
+            // the planned geometry stale so the next event tries again.
             val s = settings.state.value
-            if (snap.display != plannedDisplay && s.ratio != null && engageJob?.isActive != true) {
+            val rotation = service.displayRotation()
+            if ((snap.display != plannedDisplay || rotation != plannedRotation) &&
+                s.ratio != null && engageJob?.isActive != true
+            ) {
                 // Recorded here, not on success: an adjust that cannot land right now
                 // leaves pendingAdjust to retry it, and re-detecting the same rotation
                 // on every subsequent bounds event would spin.
-                android.util.Log.i(TAG, "rotation: $plannedDisplay -> ${snap.display}, re-applying")
+                android.util.Log.i(
+                    TAG,
+                    "rotation: $plannedDisplay/$plannedRotation -> ${snap.display}/$rotation," +
+                        " re-applying",
+                )
                 plannedDisplay = snap.display
+                plannedRotation = rotation
                 launchAdjust(st, service, s.ratio, s.positionPref)
                 return@launch
             }
@@ -498,23 +511,26 @@ class EngagementController(
     }
 
     /**
-     * Measure, plan, swap panes if needed (verified), drag the divider (with error
-     * compensation on retry), and verify the achieved ratio honestly.
+     * Measure, plan, swap panes if needed (verified), drag the divider, and verify the
+     * achieved ratio honestly. A retry simply re-measures and re-plans: the drag lands
+     * within 1px of its request every time it moves at all (measured, Fold8), so there
+     * is no snap error to compensate — the old `err`-based compensation was correcting a
+     * grid that does not exist and turned a stalled drag into a real overshoot.
      */
     private suspend fun adjustToPlan(
         service: DividerAccessibilityService,
         pkg: String,
         ratio: AspectRatio,
         retriesLeft: Int,
-        compensationPx: Int = 0,
         positionPrefOverride: PositionPref? = null,
     ) {
         val settled = settledPanes(service, pkg)
         val divider = settled?.divider ?: return fail(FailReason.DIVIDER_LOST)
         val display = settled.display
-        // The geometry this plan is valid for; a later bounds event reporting a
-        // different display means a rotation invalidated it (onSpacerBoundsChanged).
+        // The geometry this plan is valid for; a later event reporting a different
+        // display or rotation means a rotation invalidated it (onGeometryChanged).
         plannedDisplay = display
+        plannedRotation = service.displayRotation()
         if (abortRequested(service)) return
 
         // Prefer the measured inter-pane gap over the divider window bounds: some
@@ -592,7 +608,7 @@ class EngagementController(
             }
         }
         val from = Point(fresh.centerX(), fresh.centerY())
-        val to = Point(fresh.centerX(), plan.dividerCenterPx + compensationPx)
+        val to = Point(fresh.centerX(), plan.dividerCenterPx)
         val dragged = service.dragDivider(from, to)
         awaitDragSettle(service, pkg, current.video)
         if (abortRequested(service)) return
@@ -605,7 +621,7 @@ class EngagementController(
         if (result == null || videoPane == null || !dragged) {
             if (retriesLeft > 0) {
                 android.util.Log.w(TAG, "adjust: retry[unsettled] dragged=$dragged panes=${result != null}")
-                return adjustToPlan(service, pkg, ratio, retriesLeft - 1, compensationPx, positionPrefOverride)
+                return adjustToPlan(service, pkg, ratio, retriesLeft - 1, positionPrefOverride)
             }
             return fail(FailReason.ADJUST_FAILED)
         }
@@ -619,7 +635,7 @@ class EngagementController(
         if (!sideOk) {
             if (retriesLeft > 0) {
                 android.util.Log.w(TAG, "adjust: retry[side] want=${plan.videoSide} divider=${dividerNow != null}")
-                return adjustToPlan(service, pkg, ratio, retriesLeft - 1, compensationPx, positionPrefOverride)
+                return adjustToPlan(service, pkg, ratio, retriesLeft - 1, positionPrefOverride)
             }
             return fail(FailReason.ADJUST_FAILED)
         }
@@ -627,13 +643,13 @@ class EngagementController(
         val achieved = RatioMath.achievedRatio(videoPane.width(), videoPane.height())
         if (plan.exactRatio && !RatioMath.isWithinTolerance(achieved, ratio)) {
             if (retriesLeft > 0) {
-                // Compensate the systematic snap error instead of replaying the same drag.
+                // Re-measure and re-plan; the retry's drag starts from wherever this one
+                // actually left the divider, so it closes the remaining distance itself.
                 val err = videoPane.height() - plan.videoPaneLengthPx
-                val delta = if (plan.videoSide == PaneSide.FIRST) -err else err
-                android.util.Log.w(TAG, "adjust: retry[ratio] achieved=$achieved err=${err}px delta=$delta")
-                return adjustToPlan(service, pkg, ratio, retriesLeft - 1, compensationPx + delta, positionPrefOverride)
+                android.util.Log.w(TAG, "adjust: retry[ratio] achieved=$achieved err=${err}px")
+                return adjustToPlan(service, pkg, ratio, retriesLeft - 1, positionPrefOverride)
             }
-            // Still off after compensation: report honestly, never claim exact.
+            // Still off after the retry: report honestly, never claim exact.
             coroutineContext.ensureActive()
             setEngaged(pkg, plan.copy(exactRatio = false), achieved, videoPane)
             return
@@ -707,9 +723,21 @@ class EngagementController(
      */
     private fun isPlannable(snap: PaneSnapshot?, prev: PaneSnapshot?): Boolean {
         val divider = snap?.divider ?: return false
-        if (!listOfNotNull(snap.video, snap.spacer, divider).all { snap.display.contains(it) }) {
-            return false
-        }
+        val video = snap.video ?: return false
+        val spacer = snap.spacer ?: return false
+        if (!snap.display.contains(divider)) return false
+        // A settled split TILES the display: the two panes' union is the whole display
+        // and the strip between them is the real divider thickness. Nothing weaker works
+        // — the entry frame that made every engage land 2-4% off had both panes inside
+        // the display, held still for a poll, did not overlap, and still left a POSITIVE
+        // 108px gap, because the spacer was mid-animation at Rect(167,1352-2089,2412):
+        // 92px short of the bottom edge. Planning took 108px as the divider thickness
+        // against a real 16px, i.e. 46px of divider centre — exactly the error that was
+        // being blamed on a One UI snap grid (measured, Fold8/One UI 9).
+        // ponytail: assumes panes tile the display, true on every measured build; a build
+        // that inset them would just burn the settle budget and behave as before.
+        if (Rect(video).apply { union(spacer) } != snap.display) return false
+        if (measuredGap(video, spacer) == null) return false
         return snap == prev
     }
 

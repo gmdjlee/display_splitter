@@ -6,13 +6,18 @@ import android.content.Context
 import android.graphics.Path
 import android.graphics.Point
 import android.graphics.Rect
+import android.hardware.display.DisplayManager
 import android.os.Build
+import android.view.Display
+import android.view.Surface
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityWindowInfo
 import android.view.WindowManager
 import androidx.window.layout.FoldingFeature
 import androidx.window.layout.WindowInfoTracker
 import com.displaysplitter.App
+import com.displaysplitter.geometry.Box
+import com.displaysplitter.geometry.RatioMath
 import com.displaysplitter.overlay.OverlayService
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -42,9 +47,30 @@ class DividerAccessibilityService : AccessibilityService() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val controller get() = App.from(this).controller
 
+    /**
+     * The camera hole moves with the display rotation, so the plan must be re-made for it.
+     * A 90°/270° rotation also changes the display SIZE and is already caught by the pane
+     * bounds, but a 180° flip changes NEITHER size nor pane bounds — this listener is the
+     * only signal for it, and it is the framework's own contract for "the display rotated".
+     */
+    private var lastRotation = Surface.ROTATION_0
+    private val rotationListener = object : DisplayManager.DisplayListener {
+        override fun onDisplayAdded(displayId: Int) = Unit
+        override fun onDisplayRemoved(displayId: Int) = Unit
+        override fun onDisplayChanged(displayId: Int) {
+            // Also fires for refresh rate / brightness / HDR: only a rotation is our business.
+            val rotation = displayRotation()
+            if (rotation == lastRotation) return
+            lastRotation = rotation
+            controller.onGeometryChanged()
+        }
+    }
+
     override fun onServiceConnected() {
         super.onServiceConnected()
         instance = this
+        lastRotation = displayRotation()
+        getSystemService(DisplayManager::class.java).registerDisplayListener(rotationListener, null)
         controller.onServiceConnected(true)
         controller.onInnerDisplayChanged(isOnInnerDisplay())
         observePosture()
@@ -56,6 +82,7 @@ class DividerAccessibilityService : AccessibilityService() {
             instance = null
             controller.onServiceConnected(false)
         }
+        getSystemService(DisplayManager::class.java).unregisterDisplayListener(rotationListener)
         scope.cancel()
         super.onDestroy()
     }
@@ -132,12 +159,27 @@ class DividerAccessibilityService : AccessibilityService() {
         return wm.maximumWindowMetrics.bounds
     }
 
+    fun displayRotation(): Int =
+        getSystemService(DisplayManager::class.java)
+            .getDisplay(Display.DEFAULT_DISPLAY)?.rotation ?: Surface.ROTATION_0
+
+    /** Camera-hole rects in CURRENT display coordinates (rotation applied). */
     fun displayCutoutRects(): List<Rect> {
-        // One UI 8.5 hides the cutout from third-party apps entirely (empty here too);
-        // RatioMath.resolveVideoSide treats "no cutout data" as hole-on-top, which is
-        // correct for every current fold. AOSP builds report it normally.
-        val wm = getSystemService(WindowManager::class.java)
-        return wm.maximumWindowMetrics.windowInsets.displayCutout?.boundingRects ?: emptyList()
+        val metrics = getSystemService(WindowManager::class.java).maximumWindowMetrics
+        // AOSP and the cover display report the cutout normally, already rotated.
+        metrics.windowInsets.displayCutout?.boundingRects?.let { if (it.isNotEmpty()) return it }
+        // The fold INNER display never does: One UI parks the hole in its private
+        // DisplayContent.udcCutout and leaves the standard cutout null, so every
+        // app-facing API sees nothing (measured on One UI 8.5/Fold7 and 9.0/Fold8).
+        // Fall back to the panel's measured hole, rotated exactly as the framework
+        // would have rotated a real cutout. Unknown panel → empty, and
+        // RatioMath.resolveVideoSide's hole-on-top default applies as before.
+        val b = metrics.bounds
+        val naturalW = minOf(b.width(), b.height())
+        val naturalH = maxOf(b.width(), b.height())
+        val hole = KNOWN_INNER_HOLES[naturalW to naturalH] ?: return emptyList()
+        val r = RatioMath.rotateBox(hole, naturalW, naturalH, displayRotation())
+        return listOf(Rect(r.left, r.top, r.right, r.bottom))
     }
 
     /** Snapshot of the current split: video pane, our spacer pane, and the divider. */
@@ -179,6 +221,10 @@ class DividerAccessibilityService : AccessibilityService() {
     suspend fun dragDivider(from: Point, to: Point): Boolean =
         holdThenDrag(from, to, HOLD_MS, DRAG_MS)
 
+    /** How far a divider drag swings past its target to clear One UI's drag slop.
+     *  Comfortably above the 8dp view slop; raise it if a build ignores short drags. */
+    private fun slopClearancePx(): Int = (SLOP_CLEARANCE_DP * resources.displayMetrics.density).toInt()
+
     /**
      * Long-press at [from], then drag to [to] — the accessibility equivalent of
      * `input draganddrop`. Two measured One UI traps shape this implementation:
@@ -201,6 +247,12 @@ class DividerAccessibilityService : AccessibilityService() {
         val dragStroke = holdStroke.continueStroke(
             Path().apply {
                 moveTo(fx + 1f, fy)
+                // A short move never clears One UI's drag slop and the divider does not
+                // budge AT ALL — measured on Fold8: a 24px request moved nothing, a 49px
+                // one landed exactly. Swing past the target first so every drag clears
+                // slop regardless of distance, then come back to the exact target.
+                val past = if (to.y < fy) -slopClearancePx() else slopClearancePx()
+                lineTo(to.x.toFloat(), (to.y + past).toFloat())
                 lineTo(to.x.toFloat(), to.y.toFloat())
             },
             0, moveMs, false,
@@ -346,8 +398,21 @@ class DividerAccessibilityService : AccessibilityService() {
 
         const val INNER_DISPLAY_MIN_SW_DP = 600
 
+        /**
+         * Inner-display camera holes, keyed by NATURAL (portrait) display size in px and
+         * expressed in natural coordinates. Read off `dumpsys window displays` — One UI
+         * keeps them in its private `udcCutout` and exposes them through no app-facing
+         * API, so a measured table is the only source (docs/DEVICE_VERIFICATION.md).
+         * An unknown panel is simply absent → the hole-on-top default applies as before.
+         */
+        private val KNOWN_INNER_HOLES = mapOf(
+            (1968 to 2184) to Box(1450, 18, 1520, 88), // Fold7 SM-F966N, One UI 8.5
+            (2256 to 2504) to Box(1665, 22, 1747, 104), // Fold8 SM-F976N, One UI 9.0
+        )
+
         private const val HOLD_MS = 150L
         private const val DRAG_MS = 350L
+        private const val SLOP_CLEARANCE_DP = 20f
         private const val GESTURE_TIMEOUT_MS = 3_000L
         private const val TAP_MS = 60L
 

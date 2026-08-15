@@ -31,8 +31,11 @@ and RatioMath computes the target divider position:
   • horizontal divider (top/bottom): pane height = paneWidth / ratio  → zero letterbox
         ▼
 service drags the divider (dispatchGesture) to that position; the result is re-measured
-and corrected once. The black spacer sits on the camera-hole side (auto-detected from
-DisplayCutout; user-overridable) and can show an ambient clock or memo (SpacerContent).
+and corrected once. The black spacer sits on the camera-hole side — from DisplayCutout
+where the platform exposes it, else from a measured per-panel rect (One UI hides the fold
+inner display's hole from every app-facing API), rotated with the display so a 180° flip
+moves the spacer too; user-overridable. The spacer can show an ambient clock or memo
+(SpacerContent).
 ```
 
 ## Split-screen initiation — important

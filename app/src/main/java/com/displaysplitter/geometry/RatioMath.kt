@@ -99,6 +99,25 @@ object RatioMath {
         }
     }
 
+    /**
+     * Rotate [box] out of the display's NATURAL frame into the frame for [rotation]
+     * (`Surface.ROTATION_0..3`). [naturalWidth]/[naturalHeight] are the unrotated display
+     * dimensions. Mirrors `android.util.RotationUtils.rotateBounds`, which is what the
+     * framework itself applies to the natural DisplayCutout for each rotation
+     * (`DisplayContent.calculateDisplayCutoutForRotation`) — so a hole rotated here lands
+     * exactly where a platform-reported cutout would.
+     */
+    fun rotateBox(box: Box, naturalWidth: Int, naturalHeight: Int, rotation: Int): Box =
+        when (rotation) {
+            1 -> Box(box.top, naturalWidth - box.right, box.bottom, naturalWidth - box.left)
+            2 -> Box(
+                naturalWidth - box.right, naturalHeight - box.bottom,
+                naturalWidth - box.left, naturalHeight - box.top,
+            )
+            3 -> Box(naturalHeight - box.bottom, box.left, naturalHeight - box.top, box.right)
+            else -> box
+        }
+
     fun achievedRatio(width: Int, height: Int): Float =
         if (height <= 0) 0f else width.toFloat() / height
 

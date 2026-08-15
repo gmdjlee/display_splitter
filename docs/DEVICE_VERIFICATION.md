@@ -1,5 +1,144 @@
 # On-device verification — Galaxy Z Fold7 / Fold8
 
+## Results — 2026-08-15 (6): ratio accuracy SOLVED — **there is no snap grid** (SM-F976N, One UI 9.0)
+
+The "One UI snaps to a ~20px grid" explanation that every earlier session recorded is
+**wrong**. Instrumenting the drag (request vs. result, both read from the panes) settled it
+in three engages: the divider lands **within 1px of whatever it is asked for, every time it
+moves at all**. Two real bugs were hiding behind that story.
+
+| # | Drag request | Result | |
+|---|---|---|---|
+| 1 | `to=1181` | gap `1182` | exact |
+| 2 | `to=1272` | gap `1273` | exact |
+| 3 | `to=1202` | gap `1203` | exact |
+| 4 | `to=1227` (a **24px** move) | gap `1252` — **unchanged** | never moved |
+
+### Defect 4 — planning against an animating pane (fixed)
+
+`settledPanes` accepted this frame, 77ms after entry:
+
+```
+video=Rect(0, 0 - 2256, 1244)  spacer=Rect(167, 1352 - 2089, 2412)  → gap=108, t=108
+```
+
+Both panes inside the display, not overlapping, unchanged for a poll — every existing test
+passes — yet the spacer is mid-animation: **92px short of the bottom edge and not full
+width**. So the "divider thickness" measured 108px against a real 16px, putting
+`dividerCenterPx` 46px off. *That* is the 45px error every session blamed on a snap grid.
+
+Fix: `isPlannable` now requires the two panes to **tile the display** — `union(video,
+spacer) == display` — plus a positive gap. Both panes must be present, which is what
+"plannable" meant all along.
+
+### Defect 5 — a drag shorter than the touch slop moves nothing (fixed)
+
+With the thickness right, the first drag became a **24px** move — and One UI ignored it
+completely (row 4 above; 49px worked). 24px is exactly the 8dp view slop at this density.
+
+Fix: `holdThenDrag` swings `SLOP_CLEARANCE_DP` (20dp) past the target and comes back within
+the same stroke, so every drag clears slop regardless of distance and still ends exactly on
+target.
+
+### The `err` compensation was removed, not tuned
+
+It existed to cancel the imaginary grid, and it is what turned defect 5 into a visible
+error: the stalled drag left the full 25px residual, which the compensation then *added* to
+an already-correct target and overshot. A retry now simply re-measures and re-plans — its
+drag starts from wherever the previous one really left the divider, so it closes the
+remaining distance by itself. `adjustToPlan` lost its `compensationPx` parameter.
+
+### Verification — 10 operations, 10 × `exact=true`, 0 retries
+
+```
+entry ×3 (Idle → engaged, 3.5s)      1.7791798  1.7791798  1.7791798
+rotation 0→180                        1.7791798  pane=Rect(0, 0 - 2256, 1268)   video TOP
+rotation 180→0                        1.7791798  pane=Rect(0, 1236 - 2256, 2504)
+rotation 0→90                         1.7784091  pane=Rect(0, 848 - 2504, 2256)
+rotation 90→0                         1.7791798
+live 21:9 / 4:3 / 16:9                2.3354037  1.3341218  1.7791798
+```
+
+Not one `adjust: retry[...]` in the whole run. 16:9 target is 1.7777778, so the worst case
+is **0.08% off** — the residual is the 1px rounding of the 16px divider gap. Rotation
+re-apply also got faster (1.4–1.6s, was ~2.4s) because the second drag is gone. The entry's
+own first drag is a 24px move, so defect 5's fix is exercised on every single engage.
+
+## Results — 2026-08-15 (5): camera-hole detection — **NOT detected, root cause found** (SM-F976N, One UI 9.0)
+
+The app does **not** recognize the inner camera hole on this device, and the reason is now
+known rather than assumed. Measured with a temporary probe in
+`DividerAccessibilityService.displayCutoutRects()` (reverted after the read):
+
+```
+cutout-probe: bounds=Rect(0, 0 - 2256, 2504) cutout=null rects=null insets=null,null,null,null
+```
+
+`WindowInsets.getDisplayCutout()` is **null**, not merely empty. The framework does know
+the hole — `dumpsys window displays`, inner display id 0:
+
+```
+initCutout=null
+baseCutout=null
+udcCutout=DisplayCutout{insets=Rect(0, 104 - 0, 0)
+          boundingRect={… Rect(1665, 22 - 1747, 104) …}          ← TOP position slot
+          cutoutSpec={… a 13.667,13.667 … @dp}}                  ← 27.3dp circle
+WindowInsetsStateController.InsetsState.mDisplayCutout = all-zero bounds
+```
+
+So One UI parks the inner hole in Samsung's private `DisplayContent.udcCutout` and leaves
+the **standard** cutout null on that display — the state dispatched to every window on
+display 0 carries zero bounds, and `1665` appears exactly **once** in the whole
+`dumpsys window` output (that private field). This is upstream of every app-facing API,
+which is why the One UI 8.5 pass found all four of them null. The **cover** display (id 1,
+1080×2520) does carry a normal `initCutout` (`Rect(505, 0 - 575, 108)`) — the suppression
+is inner-display-specific.
+
+| | Fold7 / One UI 8.5 | Fold8 / One UI 9.0 |
+|---|---|---|
+| `getDisplayCutout()` on inner display | null | **null** (unchanged) |
+| Real hole (system-private) | `Rect(1450, 18 - 1520, 88)` @1968×2184 | `Rect(1665, 22 - 1747, 104)` @2256×2504 |
+
+The old fallback ("no cutout data" → hole-on-top → `PaneSide.SECOND`) was right at
+`ROTATION_0` by luck, and wrong at `ROTATION_180`/`ROTATION_270`, where the hole moves into
+the *video* pane. Fixed and verified below.
+
+### Fix — measured hole table + rotation signal (VERIFIED on device)
+
+Three pieces, because the hole being wrong and the app never noticing were separate bugs:
+
+1. `RatioMath.rotateBox` rotates a natural-frame rect into the current rotation with the
+   framework's own transform (`android.util.RotationUtils.rotateBounds`, what
+   `DisplayContent.calculateDisplayCutoutForRotation` applies to a real cutout).
+2. `displayCutoutRects()` uses the platform cutout when there is one (AOSP, cover display)
+   and otherwise looks the panel up in `KNOWN_INNER_HOLES` — the two measured rects above,
+   keyed by natural display size — and rotates it. Unknown panel → empty, i.e. exactly the
+   old behavior.
+3. `DisplayManager.DisplayListener` in the service → `EngagementController.onGeometryChanged`
+   (renamed from `onSpacerBoundsChanged`), which now compares `plannedRotation` as well as
+   `plannedDisplay`. **A 180° flip changes neither the display size nor any pane bounds**, so
+   no existing event could see it; 90°/270° were already covered by the bounds path.
+
+Measured, YouTube 16:9, 영상 위치 = 자동:
+
+```
+engaged: … pane=Rect(0, 1281 - 2256, 2504)              ← rot 0, video BOTTOM (hole top)
+rotation: Rect(0,0-2256,2504)/0 -> Rect(0,0-2256,2504)/2, re-applying   ← identical bounds
+clickWhenFound: [switch-node] a11y-click
+engaged: … achieved=1.6551725 exact=false pane=Rect(0, 0 - 2256, 1363)  ← video TOP
+rotation: Rect(0,0-2256,2504)/2 -> Rect(0,0-2256,2504)/0, re-applying
+engaged: … achieved=1.7791798 exact=true  pane=Rect(0, 1236 - 2256, 2504) ← back to BOTTOM
+```
+
+Screenshot at 180° confirms it visually: video pane on top, black spacer (ambient clock)
+on the bottom, which is where the hole physically is at that rotation. Round trip took
+~2.4s each way and the split survived both.
+
+**Caveat at the time — since RESOLVED by (6):** the 0→180 leg landed `achieved=1.655` (6.9%
+off) while 180→0 landed `exact=true`; side selection was correct both ways. The leg needing
+a pane *swap* was the one that missed, because the swap left an animating pane to plan
+against. Both legs now land `exact=true`.
+
 ## Results — 2026-08-15 (4): rotation re-apply VERIFIED (SM-F976N, One UI 9.0)
 
 Rotating the device while engaged now re-plans and re-drags the divider for the new
@@ -100,7 +239,7 @@ policy), and `EngagementController.onForegroundPackage` retries a pending adjust
 own-package event. Re-verified: BACK from settings, no touch on the video → swap +
 `engaged: achieved=2.3354037 exact=true` in ~3.5s (including one divider-popup re-tap).
 
-### Open finding — entry lands 2–4% off — **retry branch identified 2026-08-15 (4)**
+### ~~Open finding~~ RESOLVED 2026-08-15 (6) — entry lands 2–4% off
 
 The §1 question below is **answered**: only `retry[ratio]` fires on entry — never
 `retry[side]`/`retry[unsettled]` — so the shared-budget hypothesis is **disproved**.
@@ -120,7 +259,11 @@ compensation cannot converge. Next step: measure whether the first drag's shortf
 constant (a gesture/hold artifact — the drag starts at the divider's live centre) and
 compensate the *first* drag instead of only the retry.
 
-### Original open finding — entry lands 2–4% off, a live re-tap lands exact
+### ~~Original open finding~~ RESOLVED 2026-08-15 (6) — a live re-tap lands exact
+
+Answered by (6): a live re-tap starts from a *settled* split, so it measured the real 16px
+gap and its drag was long enough to clear slop. The entry did neither. The snap-grid
+premise below is wrong — kept for the record.
 
 Every *entry* on this device settled outside the 2% tolerance for 16:9 — 1.8135 /
 1.8446 / 1.7488 (`exact=false`, reported honestly) — while a *live* ratio re-tap on the
@@ -243,7 +386,7 @@ live video ×2), all committed successfully.
 | 위치 전환 (flip chip) | Divider-popup 창 전환 driven; panes swapped video→TOP, spacer→BOTTOM; re-settled at **1.7777778 exact=true** (flip landed on the exact 16:9 snap). |
 | 전체 화면 (restore chip) | Split dissolves, video app fullscreen, state Idle, spacer window gone (`dumpsys window` count 0). |
 
-Snap-grid note: achieved ratios across entries were 1.814 / 1.716 / 1.740 / 1.7778 —
+Snap-grid note (DISPROVED by 2026-08-15 (6) — the drag is exact; the thickness was measured off an animating pane): achieved ratios across entries were 1.814 / 1.716 / 1.740 / 1.7778 —
 One UI's ~20px grid scatters around 16:9 and the app reports each honestly
 (`exact` only at 1.7778).
 
@@ -280,7 +423,7 @@ at the target ratio, in ~5s, repeatably.
 | MENU recipe (unresizeable apps, Netflix) | card icon → "분할 화면으로 열기" (L/R) → picker → divider handle → "시계 방향으로 회전" → T/B. `ResizeMode` privateFlags bit 1<<11 correctly classifies Netflix |
 | Picker discovery | Fresh install: picker search escalation (search button → SET_TEXT "DS 스페이서" → result tap). After first use the spacer shows up in the picker's recent/frequent sections and is tapped directly |
 | Pane swap (flip) | Divider-handle popup "창 전환" — a bare double-tap on the handle just opens/mis-taps that popup (measured); popup click is the only swap that works |
-| Divider drag to ratio | One UI snaps to a grid ~20px coarse: 16:9 target lands at 1.74:1 (2.1% off — just outside the 2% tolerance, so exact=false) — reported honestly in the UI |
+| Divider drag to ratio | (snap-grid reading DISPROVED, see 2026-08-15 (6)) apparent ~20px coarseness: 16:9 target lands at 1.74:1 (2.1% off — just outside the 2% tolerance, so exact=false) — reported honestly in the UI |
 | Restore (전체 화면으로) | Spacer self-finishes → split dissolves → video app fullscreen |
 | Measured traps fixed this session | ① hold stroke needs 1px drift AND the continuation must wait out holdMs (queued-continuation collapses the hold); ② the spacer's cover-screen guard must use DISPLAY size, not its own pane-sized configuration (it was self-destructing on landing); ③ divider window leaves the a11y list for whole animation durations (1.5s settle polls); ④ picker search field's own text matches the label — exclude editable nodes |
 
@@ -314,8 +457,10 @@ unfillable on One UI 8.5 — see above), `settledPanes` on the engage first-chec
    guidance to "pick Display Splitter as the second app"; have the in-pane MainActivity
    launch SpacerActivity into its own task (same-task launch stays in the pane); research
    Samsung app-pair APIs.
-2. Cutout source: seed a small per-model table (Fold7 inner 1968×2184 → 1450,18,1520,88)
-   or find a One UI-visible source; without it hole-avoid no-ops (graceful, but does nothing).
+2. Cutout source: seed a small per-display-size table (Fold7 inner 1968×2184 →
+   1450,18,1520,88; Fold8 inner 2256×2504 → 1665,22,1747,104) or find a One UI-visible
+   source; without it hole-avoid no-ops (graceful, but does nothing). **No One UI-visible
+   source exists** — see 2026-08-15 (5): the hole lives in the private `udcCutout` field.
 3. Physical checks below (fold/flex/0ms) still require hands on the device.
 
 
