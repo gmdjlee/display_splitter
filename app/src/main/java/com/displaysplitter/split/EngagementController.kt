@@ -104,6 +104,11 @@ class EngagementController(
     private var disengageGraceJob: Job? = null
     private var boundsJob: Job? = null
 
+    /** A settings change was skipped because the split wasn't visibly intact (e.g. the
+     *  settings screen fullscreen over it); re-applied on the next video-app foreground
+     *  event instead of being silently dropped. */
+    private var pendingAdjust = false
+
     /**
      * Status-bar visibility sampled from the overlay window's insets (OverlayService).
      * Hidden bars = the foreground app is immersive fullscreen, where One UI ignores
@@ -116,55 +121,95 @@ class EngagementController(
     init {
         // Target ratio or video position changed while engaged (quick panel or settings
         // screen): re-adjust to the new target. Observed from the settings flow so every
-        // entry point gets this without wiring; both values are passed straight to
-        // adjustToPlan, never re-read via the StateFlow (same ordering caveat as
-        // flipVideoSide).
+        // entry point gets this without wiring.
         scope.launch {
             var last: Pair<AspectRatio?, PositionPref>? = null
             settings.state.map { it.ratio to it.positionPref }.distinctUntilChanged().collect { cur ->
                 val (ratio, pref) = cur
-                val ratioChanged = last != null && last?.first != ratio
-                val prefChanged = last != null && last?.second != pref
-                last = cur
+                // Ratio off: nothing can be applied — leave the change unconsumed
+                // (don't advance `last`) so re-enabling the ratio re-delivers it.
                 if (ratio == null) return@collect
+                val prev = last
+                last = cur
+                // prev == null only for the seed emission, which is never a change.
+                val ratioChanged = prev != null && prev.first != ratio
+                val prefChanged = prev != null && prev.second != pref
                 // Changed mid-engagement: let the in-flight run land first, then correct
                 // to the newest target (StateFlow conflation keeps only the latest value).
                 engageJob?.join()
+                // Taps during the join are conflated behind us: bail and let that newer
+                // emission drive, rather than first adjusting to a superseded target.
+                if (settings.state.value.let { it.ratio to it.positionPref } != cur) return@collect
                 val st = _state.value as? EngageState.Engaged ?: return@collect
                 val service = DividerAccessibilityService.instance ?: return@collect
                 if (engageJob?.isActive == true) return@collect
                 val needRatio = ratioChanged && !RatioMath.isWithinTolerance(st.achievedRatio, ratio)
-                // FIRST/SECOND already satisfied by the current side is a no-op — this
-                // also swallows the pref emission flipVideoSide persists after a
-                // successful flip. AUTO always re-plans: only RatioMath.plan knows which
-                // side AUTO resolves to on this geometry.
-                val needPref = prefChanged && when (pref) {
-                    PositionPref.FIRST -> st.plan.videoSide != PaneSide.FIRST
-                    PositionPref.SECOND -> st.plan.videoSide != PaneSide.SECOND
-                    PositionPref.AUTO -> true
-                }
+                // A pref already satisfied by the current side is a no-op — this also
+                // swallows the pref emissions flipVideoSide and the reconciliation in
+                // launchAdjust persist. AUTO is resolved on the spot from the same
+                // inputs RatioMath.plan uses, so it can no-op symmetrically.
+                val needPref = prefChanged && st.plan.videoSide != resolvedSide(service, pref)
                 if (!needRatio && !needPref) return@collect
-                engageJob = scope.launch {
-                    // Engaging detaches the overlay immediately (OverlayService skips its
-                    // hide debounce for this state); handshake on the actual detach — the
-                    // drag takes the finger's hit-test path and a still-attached quick
-                    // panel would swallow it (see bubbleVisible).
-                    _state.value = EngageState.Engaging(st.packageName)
-                    awaitOverlayDetached()
-                    // Only adjust a split that is visibly intact (e.g. the settings screen
-                    // fullscreen over the split hides the divider): failing would tear the
-                    // healthy split down, so skip — the change applies on the next engage.
-                    val snap = settledPanes(service, st.packageName)
-                    if (snap?.divider == null || snap.video == null) {
-                        _state.value = st
-                        return@launch
-                    }
-                    // ponytail: failures past this point keep engage-path semantics
-                    // (Failed → spacer teardown); fail-soft needs adjustToPlan surgery.
-                    adjustToPlan(service, st.packageName, ratio, retriesLeft = 1, positionPrefOverride = pref)
-                }
+                launchAdjust(st, service, ratio, pref)
             }
         }
+    }
+
+    /** Engaging → overlay-detach → verify-intact → adjustToPlan, shared by the settings
+     *  observer and the pending-change retry. [ratio]/[pref] are passed straight through,
+     *  never re-read via the StateFlow mid-flight (same ordering caveat as flipVideoSide). */
+    private fun launchAdjust(
+        st: EngageState.Engaged,
+        service: DividerAccessibilityService,
+        ratio: AspectRatio,
+        pref: PositionPref,
+    ) {
+        engageJob = scope.launch {
+            // Engaging detaches the overlay immediately (OverlayService skips its
+            // hide debounce for this state); handshake on the actual detach — the
+            // drag takes the finger's hit-test path and a still-attached quick
+            // panel would swallow it (see bubbleVisible).
+            _state.value = EngageState.Engaging(st.packageName)
+            awaitOverlayDetached()
+            // Only adjust a split that is visibly intact (e.g. the settings screen
+            // fullscreen over the split hides the divider): failing would tear the
+            // healthy split down. Skip, but keep the change pending — it re-applies
+            // on the next video-app foreground event (retryPendingAdjust).
+            val snap = settledPanes(service, st.packageName)
+            if (snap?.divider == null || snap.video == null) {
+                pendingAdjust = true
+                _state.value = st
+                // st predates the suspensions above and bounds events are suppressed
+                // while Engaging: re-measure in case the divider moved meanwhile.
+                onSpacerBoundsChanged()
+                return@launch
+            }
+            pendingAdjust = false
+            // ponytail: failures past this point keep engage-path semantics
+            // (Failed → spacer teardown); fail-soft needs adjustToPlan surgery.
+            adjustToPlan(service, st.packageName, ratio, retriesLeft = 1, positionPrefOverride = pref)
+            // The chips persist the pref BEFORE this adjust proves it achievable; if the
+            // swap was unavailable, adjustToPlan re-planned for the side the video really
+            // occupies — write that side back so the stored pref never disagrees with
+            // reality (and the chip stays re-tappable). Explicit FIRST/SECOND only:
+            // AUTO stays AUTO. The echo emission is swallowed by the observer's guard.
+            val end = _state.value as? EngageState.Engaged ?: return@launch
+            if (pref != PositionPref.AUTO && end.plan.videoSide != resolvedSide(service, pref)) {
+                settings.setPositionPref(
+                    if (end.plan.videoSide == PaneSide.FIRST) PositionPref.FIRST else PositionPref.SECOND,
+                )
+            }
+        }
+    }
+
+    /** Re-applies a settings change that was skipped while the split was covered,
+     *  now that a video app is back in the foreground. */
+    private fun retryPendingAdjust(st: EngageState.Engaged) {
+        if (!pendingAdjust || engageJob?.isActive == true) return
+        val service = DividerAccessibilityService.instance ?: return
+        val s = settings.state.value
+        val ratio = s.ratio ?: return
+        launchAdjust(st, service, ratio, s.positionPref)
     }
 
     /** Package engaged when the device was folded shut, for auto re-engage on unfold. */
@@ -221,6 +266,7 @@ class EngagementController(
             is EngageState.Engaged -> {
                 if (isVideo || pkg == SYSTEM_UI) {
                     disengageGraceJob?.cancel()
+                    if (isVideo) retryPendingAdjust(st)
                 } else {
                     // A non-video app took over: restore full screen after a short grace period.
                     if (disengageGraceJob?.isActive != true) {
@@ -298,6 +344,11 @@ class EngagementController(
             val snap = service.panes(st.packageName) ?: return@launch
             val video = snap.video ?: return@launch
             _state.value = st.copy(
+                // The user may have swapped panes via the system's own divider popup:
+                // videoSide must track the measured side or every side-dependent
+                // consumer (needPref guard, flip direction, diagram) goes stale.
+                plan = snap.divider?.let { d -> st.plan.copy(videoSide = sideOf(video, d)) }
+                    ?: st.plan,
                 achievedRatio = RatioMath.achievedRatio(video.width(), video.height()),
                 videoPane = video,
             )
@@ -335,8 +386,12 @@ class EngagementController(
             // DataStore StateFlow, whose propagation is not ordered with this coroutine.
             adjustToPlan(service, st.packageName, ratio, retriesLeft = 1, positionPrefOverride = newPref)
             // Persist only after the flip actually took effect: a failed flip must not
-            // poison future engagements with an unfulfilled preference.
-            if (_state.value is EngageState.Engaged) settings.setPositionPref(newPref)
+            // poison future engagements with an unfulfilled preference. "Took effect"
+            // means the achieved side matches — the swap-unavailable fallback still
+            // lands Engaged, on the original side, after re-planning honestly.
+            if ((_state.value as? EngageState.Engaged)?.plan?.videoSide == newSide) {
+                settings.setPositionPref(newPref)
+            }
         }
     }
 
@@ -511,9 +566,11 @@ class EngagementController(
         if (abortRequested(service)) return
 
         // Verify against what the system actually gave us (snap points may differ).
-        val result = service.panes(pkg)
+        // Settled read: the divider leaves the windows list for whole animation
+        // durations, and the side verdict below needs it present to mean anything.
+        val result = settledPanes(service, pkg)
         val videoPane = result?.video
-        if (videoPane == null || !dragged) {
+        if (result == null || videoPane == null || !dragged) {
             if (retriesLeft > 0) {
                 return adjustToPlan(service, pkg, ratio, retriesLeft - 1, compensationPx, positionPrefOverride)
             }
@@ -521,8 +578,11 @@ class EngagementController(
         }
 
         // The video must sit on the planned side — a converged-but-wrong-side result
-        // would put the video under the camera hole silently.
-        val sideOk = result.divider == null || sideOf(videoPane, result.divider) == plan.videoSide
+        // would put the video under the camera hole silently. Divider still absent
+        // after the settled read = no verdict: retry (whose own settled re-read
+        // decides) instead of recording the planned side as fact.
+        val dividerNow = result.divider
+        val sideOk = dividerNow != null && sideOf(videoPane, dividerNow) == plan.videoSide
         if (!sideOk) {
             if (retriesLeft > 0) {
                 return adjustToPlan(service, pkg, ratio, retriesLeft - 1, compensationPx, positionPrefOverride)
@@ -607,6 +667,15 @@ class EngagementController(
     private fun sideOf(pane: Rect, divider: Rect): PaneSide =
         if (pane.centerY() < divider.centerY()) PaneSide.FIRST else PaneSide.SECOND
 
+    /** The pane side [pref] denotes on the current geometry. AUTO is resolved from the
+     *  same display/cutout inputs RatioMath.plan uses — cheap, non-suspending reads. */
+    private fun resolvedSide(service: DividerAccessibilityService, pref: PositionPref): PaneSide =
+        RatioMath.resolveVideoSide(
+            service.displayBounds().height(),
+            service.displayCutoutRects().map { Box(it.left, it.top, it.right, it.bottom) },
+            pref,
+        )
+
     /** Effective inter-pane gap measured from the panes themselves, when available. */
     private fun measuredGap(video: Rect?, spacer: Rect?): Int? {
         if (video == null || spacer == null) return null
@@ -631,6 +700,7 @@ class EngagementController(
         reengageJob?.cancel()
         disengageGraceJob?.cancel()
         boundsJob?.cancel()
+        pendingAdjust = false
         _state.value = EngageState.Idle
     }
 

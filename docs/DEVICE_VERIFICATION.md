@@ -4,13 +4,19 @@
 
 Changing the panel's 영상 위치 chip mid-engagement now re-applies immediately (the
 ratio observer was widened to a combined ratio+positionPref observer, per-element
-change detection). Measured: 위 → swap to TOP in 2.4s, 아래 → swap to BOTTOM in 0.5s,
-both landing exact 1.7777778; re-tapping the already-active chip is a pure no-op
-(zero controller activity — this same guard swallows the pref emission that
-flipVideoSide persists after a successful tray flip, so no double-adjust); 자동
-re-plans and converges without an unnecessary swap when the side already matches.
-Unrelated known flake reproduced once during setup: swap handle tap-through opened
-the Shorts camera → ADJUST_FAILED; retry engaged fine.
+change detection). Measured: 위 → swap to TOP in 2.4s, landing exact 1.7777778 —
+the one real mid-engagement swap+drag measurement. The 아래 → 0.5s run cannot have
+exercised a real swap+drag (the gesture constants alone — hold 150 + drag 350 +
+settle floor 150 + polls — put a ~785ms floor under one); 0.5s measures the
+converged no-op short-circuit, so don't calibrate swap latency against it.
+Re-tapping the already-active chip is silent, but that comes from StateFlow
+conflation upstream (an equal SettingsState never re-emits, so the observer never
+runs for a re-tap); the observer's own side guard is exercised by a different
+path — it swallows the pref emission flipVideoSide persists after a successful
+tray flip, so no double-adjust. 자동 re-plans and converges without an unnecessary
+swap when the side already matches. Unrelated known flake reproduced once during
+setup: swap handle tap-through opened the Shorts camera → ADJUST_FAILED; retry
+engaged fine.
 
 ## Results — 2026-08-15: spacer recents card + ambient widgets VERIFIED (SM-F966N, One UI 8.5, ADB-driven)
 
@@ -45,6 +51,13 @@ ADB-driving traps learned this pass (for future sessions):
 - In MEMO mode, tray reveal needs the field margins (top status strip ~y<85 in-pane,
   or side gutters); a field tap re-opens the IME instead.
 
+Known trade-offs accepted with the recents card (qualifies #9's "zero cover-screen
+footprint" wording): the "DS 스페이서" card is visible in recents on both displays;
+tapping it outside an engagement launches-and-finishes on the first frame (state
+collector; verified above). Tapping it inside the USER'S own manual split-select
+while the app is Idle dissolves that half-built split — same dead-end class that
+already existed via the picker's frequent-apps row, now merely more prominent.
+
 Still pending (physical, user hands): cover-screen recents card visibility/wording
 (#9), fold/flex transitions, Netflix pop-up-player quirk.
 
@@ -60,7 +73,7 @@ at the target ratio, in ~5s, repeatably.
 | MENU recipe (unresizeable apps, Netflix) | card icon → "분할 화면으로 열기" (L/R) → picker → divider handle → "시계 방향으로 회전" → T/B. `ResizeMode` privateFlags bit 1<<11 correctly classifies Netflix |
 | Picker discovery | Fresh install: picker search escalation (search button → SET_TEXT "DS 스페이서" → result tap). After first use the spacer shows up in the picker's recent/frequent sections and is tapped directly |
 | Pane swap (flip) | Divider-handle popup "창 전환" — a bare double-tap on the handle just opens/mis-taps that popup (measured); popup click is the only swap that works |
-| Divider drag to ratio | One UI snaps to a grid ~20px coarse: 16:9 target lands at 1.74:1 (1.9% off, within the 2% tolerance) — reported honestly in the UI |
+| Divider drag to ratio | One UI snaps to a grid ~20px coarse: 16:9 target lands at 1.74:1 (2.1% off — just outside the 2% tolerance, so exact=false) — reported honestly in the UI |
 | Restore (전체 화면으로) | Spacer self-finishes → split dissolves → video app fullscreen |
 | Measured traps fixed this session | ① hold stroke needs 1px drift AND the continuation must wait out holdMs (queued-continuation collapses the hold); ② the spacer's cover-screen guard must use DISPLAY size, not its own pane-sized configuration (it was self-destructing on landing); ③ divider window leaves the a11y list for whole animation durations (1.5s settle polls); ④ picker search field's own text matches the label — exclude editable nodes |
 
@@ -136,7 +149,7 @@ On the phone, unfolded (inner display):
 | # | Action | Pass criteria |
 |---|--------|---------------|
 | 8 | Fold to **Flex mode** (half-open) while engaged | App pauses; bubble hidden; does not touch the divider |
-| 9 | **Close** the phone (use cover screen) | Spacer vanishes instantly; **zero** cover-screen footprint; audio/video continues via system continuity |
+| 9 | **Close** the phone (use cover screen) | Spacer vanishes instantly; **zero** cover-screen footprint (known exception: the "DS 스페이서" card in cover-screen recents — accepted trade-off, see the 2026-08-15 note); audio/video continues via system continuity |
 | 10 | **Re-open** to inner display | With "Re-apply after unfolding" on, the split is restored automatically |
 | 11 | Open a video's subtitles | Subtitles behave exactly as the video app dictates; app does not move them |
 | 12 | Use system gestures (back/home/recents) | Behave per One UI settings; app does not intercept |
