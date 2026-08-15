@@ -63,6 +63,83 @@ the `!sideOk` branch, leaving none for the ratio compensation (both branches are
 so this is unconfirmed). Next step: log which retry branch fires, then consider a
 separate compensation budget for the entry path.
 
+## Pending — 남은 검증 (재개용 절차, SM-F976N 기준)
+
+세션을 새로 시작해도 이 절이면 바로 이어서 돌릴 수 있습니다. 좌표/ID는 전부
+2026-08-15 Fold8 실측값입니다.
+
+### 0. 준비 (재개 시 1회)
+
+```bash
+JAVA_HOME="C:/Program Files/Android/Android Studio/jbr" ./gradlew assembleDebug -q --offline
+adb install -r app/build/outputs/apk/debug/app-debug.apk
+# 재설치할 때마다 a11y 권한이 풀린다 — 매번 다시 넣을 것
+adb shell settings put secure enabled_accessibility_services com.displaysplitter/com.displaysplitter.split.DividerAccessibilityService
+adb shell settings put secure accessibility_enabled 1
+adb shell appops set com.displaysplitter SYSTEM_ALERT_WINDOW allow
+adb shell pm grant com.displaysplitter android.permission.POST_NOTIFICATIONS
+adb shell dumpsys deviceidle whitelist +com.displaysplitter
+adb logcat -c && adb logcat -v time > log.txt &     # 앱 로그: grep -aE "/DisplaySplitter" log.txt
+```
+
+기기 상수 / 함정:
+- 내부 화면 스크린샷은 `adb exec-out screencap -p -d 4630946722019192211` (`-d` 없으면 커버 화면).
+- `adb shell pm list packages`는 이 기기에서 `--user 0`이 필요(보조 사용자 존재).
+- 버블 좌표는 **찍기 전에 읽을 것**:
+  `adb shell dumpsys window windows | grep -oE "[0-9a-f]+ com.displaysplitter, frame=\[Rect\([0-9, -]+\)\]" | head -1`
+  실측 [2067,834][2220,987] → 중심 (2143,910). 넷플릭스 홈에서는 y가 947로 내려갔다.
+- 패널 좌표(버블 y=834 기준): 분할 적용 / 전체 화면으로 **(1804,1809)**, 톱니 **(2016,924)**,
+  화면비 칩 y=1209 — 16:9 (1505), 21:9 (1656), 4:3 (1956).
+  **패널 버튼은 누르기 전에 항상 screencap** (실패 문구가 뜨면 패널이 늘어나 y가 밀린다).
+- 설정 화면 영상 위치: 위 (500,1886), 아래 (500,2016).
+- 스페이서 트레이는 4초 뒤 자동 숨김이고 탭이 **토글**이다 — 노출 탭과 칩 탭을 한 adb 명령에
+  묶을 것: `adb shell "input tap <pane center>; sleep 0.5; input tap <chip>"`. 칩 y는 스페이서
+  창 크기에 따라 달라지므로 매번 screencap으로 확인.
+- **engage 중 `uiautomator dump` 금지** — a11y 연결이 끊겨 즉시 해제된다.
+- 신규 설치 피커(검색) 경로를 다시 타려면 `adb shell pm clear com.displaysplitter` (권한 재부여 필요).
+
+### 1. ADB로 가능 — 진입 시 비율 오차 원인 판정
+
+진입은 항상 허용 오차 밖(16:9 → 1.81~1.84)인데 같은 분할에서 화면비를 다시 누르면
+1.7792 exact로 수렴한다. 조용하던 재시도 분기 3곳에 로그를 넣어 뒀으므로(`adjust: retry[...]`)
+**engage 한 번이면 어느 분기가 재시도 예산을 쓰는지 판정된다.**
+
+```bash
+# YouTube 16:9 영상에서 engage 후
+grep -aE "adjust: retry|engaged:" log.txt | tail -5
+```
+
+판정:
+- `retry[side]` 또는 `retry[unsettled]`가 먼저 찍히고 그 뒤 `engaged: exact=false` → 가설 확정
+  (스왑 직후 정착에 예산을 써서 비율 보정 몫이 없음). 조치: 진입 경로만 `retriesLeft = 2`,
+  또는 비율 보정에 별도 예산.
+- `retry[ratio]`만 찍히고도 빗나감 → 보정식(`err`/`delta`) 문제. 조치: 실측 `err`/`delta` 값으로
+  스냅 격자 확인 후 보정 로직 수정.
+- 아무 로그도 없이 `exact=false` → 수렴 단축(`converged`) 분기가 잘못 통과시킨 것. 조치:
+  `adjustToPlan`의 converged 판정 검토.
+
+### 2. 손이 필요 (물리 조작) — #8~#10, 0 ms
+
+각 동작 직후 아래 명령으로 판정한다. 접기 전에 반드시 engage 상태를 만들어 둘 것.
+
+| # | 물리 동작 | 판정 명령 / 기준 |
+|---|---|---|
+| 8 | engage 상태에서 **플렉스(반접기)** | `grep -aE "/DisplaySplitter" log.txt \| tail -5` → 디바이더를 건드리는 로그(`switch-node`/`adjust`)가 **없어야** 함. 버블은 사라짐: `dumpsys window windows \| grep -c "com.displaysplitter,"` → 0 |
+| 9 | **완전히 접어 커버 화면 사용** | `adb shell dumpsys window windows \| grep -c SpacerActivity` → **0** (즉시). 커버 화면에서 재생 계속되는지 눈으로 확인. 알려진 예외: 커버 recents에 "DS 스페이서" 카드가 보이는지 — **#9의 "zero footprint" 문구를 이 실측에 맞게 고칠 것** |
+| 10 | 다시 **펼치기** ("펼친 후 재적용" ON 상태) | `grep -aE "engaged:" log.txt \| tail -1` → 새 `engaged:` 줄이 자동으로 찍혀야 함 |
+| — | 0 ms 전환 | 오디오+비디오 재생 중 접었다 펴기 반복 — 오디오 끊김/영상 블랙 프레임 없어야. 앱 없이 같은 영상을 재생한 경우와 비교 |
+
+### 3. 로케일 (아직 미검증)
+
+`SplitEntryDriver`는 디바이더 팝업을 **'창 전환' / 'switch'로만** 매칭한다. 기기 언어를
+제3언어(예: 일본어)로 바꾸고 engage → 스왑이 실패할 때 칩이 실제 면으로 정직하게
+되돌아오는지(pref reconciliation) 확인. 실패 시 `ADJUST_FAILED` 대신 조용한 성공으로
+보고되면 안 된다.
+
+```bash
+adb shell am start -a android.settings.LOCALE_SETTINGS   # 수동 변경 후 원복 필요
+```
+
 ## Results — 2026-08-15 (2): live 영상 위치 change while engaged VERIFIED (SM-F966N)
 
 Changing the panel's 영상 위치 chip mid-engagement now re-applies immediately (the

@@ -580,6 +580,7 @@ class EngagementController(
         val videoPane = result?.video
         if (result == null || videoPane == null || !dragged) {
             if (retriesLeft > 0) {
+                android.util.Log.w(TAG, "adjust: retry[unsettled] dragged=$dragged panes=${result != null}")
                 return adjustToPlan(service, pkg, ratio, retriesLeft - 1, compensationPx, positionPrefOverride)
             }
             return fail(FailReason.ADJUST_FAILED)
@@ -593,6 +594,7 @@ class EngagementController(
         val sideOk = dividerNow != null && sideOf(videoPane, dividerNow) == plan.videoSide
         if (!sideOk) {
             if (retriesLeft > 0) {
+                android.util.Log.w(TAG, "adjust: retry[side] want=${plan.videoSide} divider=${dividerNow != null}")
                 return adjustToPlan(service, pkg, ratio, retriesLeft - 1, compensationPx, positionPrefOverride)
             }
             return fail(FailReason.ADJUST_FAILED)
@@ -604,6 +606,7 @@ class EngagementController(
                 // Compensate the systematic snap error instead of replaying the same drag.
                 val err = videoPane.height() - plan.videoPaneLengthPx
                 val delta = if (plan.videoSide == PaneSide.FIRST) -err else err
+                android.util.Log.w(TAG, "adjust: retry[ratio] achieved=$achieved err=${err}px delta=$delta")
                 return adjustToPlan(service, pkg, ratio, retriesLeft - 1, compensationPx + delta, positionPrefOverride)
             }
             // Still off after compensation: report honestly, never claim exact.
