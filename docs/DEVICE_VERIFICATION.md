@@ -1,5 +1,52 @@
 # On-device verification — Galaxy Z Fold7 / Fold8
 
+## Results — 2026-08-15 (4): rotation re-apply VERIFIED (SM-F976N, One UI 9.0)
+
+Rotating the device while engaged now re-plans and re-drags the divider for the new
+geometry. **Every size-changing rotation landed `exact=true` — better than the entry
+path, which still lands 2–4% off on this device (open finding below).**
+
+| Rotation | Display | Video pane | achieved |
+|---|---|---|---|
+| entry (portrait) | 2256×2504 | 2256×1224 | 1.8431 `exact=false` |
+| → landscape | 2504×2256 | 2504×1408 | **1.7784 `exact=true`** |
+| → portrait | 2256×2504 | 2256×1268 | **1.7792 `exact=true`** |
+| ×4 more (1→0→3→2→0) | — | — | all `exact=true` |
+| 4 rapid rotations, 1.5s apart | — | — | all 4 handled, all `exact=true` |
+
+Detection→re-engaged latency is a consistent **1.36s**. A **180° flip is correctly a
+no-op** (`user_rotation` 0↔2 keeps the display size, so the pane still holds the ratio
+and nothing is touched). Split survived every rotation; 전체 화면으로 still dissolves it
+cleanly afterwards. On this device One UI 9 keeps the split **top/bottom across the
+rotation** (`StageCoordinator: mChangeToHorizontalSplitLayout=false`), so the
+rotate-to-top-bottom popup step never runs — it is retained for builds that do re-lay
+the split side-by-side.
+
+### Defect 3 — planning against mid-rotation window bounds (fixed)
+
+The first implementation tore a healthy split down on every rotation
+(`ADJUST_FAILED`). Root cause, from the instrumented read at T+250ms:
+
+```
+display=Rect(0,0-2504,2256)        ← config already landscape
+divider=Rect(1176,1012-1362,1265)  ← 186w × 253h, reads as a VERTICAL divider
+video=Rect(633,68-2863,2782)       ← x=2863 past the 2504 display width
+spacer=Rect(-359,-526-1905,2209)   ← negative origin
+```
+
+The display configuration flips to the new orientation **instantly**, but the a11y
+window bounds keep reporting **animation-frame coordinates for ~0.5s**. The axis check
+read the transformed divider handle as vertical and "corrected" a perfectly good
+top/bottom split via the divider popup, which then could not satisfy its settle
+predicate → `ADJUST_FAILED` → spacer teardown.
+
+Fix: `EngagementController.settledPanes` no longer polls only for divider *presence*.
+A snapshot is plannable only when the divider is present, **every pane is inside the
+display**, and **the bounds are unchanged since the previous poll**. Both new tests are
+needed — an intermediate frame can sit inside the display, and bounds can hold still
+for one poll while still being stale. Costs one extra 75ms poll in the steady state;
+the entry path measured identical before/after (`achieved=1.843 exact=false`).
+
 ## Results — 2026-08-15 (3): FIRST PASS ON **Fold8** (SM-F976N, Android 17 / One UI 9.0)
 
 New hardware and a new OS major: inner display **2256×2504** (Fold7 was 1968×2184),
@@ -53,7 +100,27 @@ policy), and `EngagementController.onForegroundPackage` retries a pending adjust
 own-package event. Re-verified: BACK from settings, no touch on the video → swap +
 `engaged: achieved=2.3354037 exact=true` in ~3.5s (including one divider-popup re-tap).
 
-### Open finding — entry lands 2–4% off, a live re-tap lands exact
+### Open finding — entry lands 2–4% off — **retry branch identified 2026-08-15 (4)**
+
+The §1 question below is **answered**: only `retry[ratio]` fires on entry — never
+`retry[side]`/`retry[unsettled]` — so the shared-budget hypothesis is **disproved**.
+Three entries, all identical in shape:
+
+```
+adjust: retry[ratio] achieved=1.716895  err=45px delta=45   → engaged 1.8446 exact=false
+adjust: retry[ratio] achieved=1.716895  err=45px delta=45   → engaged 1.8446 exact=false
+adjust: retry[ratio] achieved=1.7182026 err=44px delta=44   → engaged 1.8431 exact=false
+```
+
+The compensation **overshoots**: first drag lands the pane 45px too TALL (1314 vs the
+1269 target), the +45px compensated retry lands it 46px too SHORT (1223) — so the
+retry's drag hit its request almost exactly while the first one undershot by ~45px.
+The snap grid is not the cause; the error is not systematic, so `err`-based
+compensation cannot converge. Next step: measure whether the first drag's shortfall is
+constant (a gesture/hold artifact — the drag starts at the divider's live centre) and
+compensate the *first* drag instead of only the retry.
+
+### Original open finding — entry lands 2–4% off, a live re-tap lands exact
 
 Every *entry* on this device settled outside the 2% tolerance for 16:9 — 1.8135 /
 1.8446 / 1.7488 (`exact=false`, reported honestly) — while a *live* ratio re-tap on the

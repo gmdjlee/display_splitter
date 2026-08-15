@@ -109,6 +109,12 @@ class EngagementController(
      *  event instead of being silently dropped. */
     private var pendingAdjust = false
 
+    /** Display bounds the current engagement was planned against. A later pane-bounds
+     *  event reporting DIFFERENT bounds means the device rotated (the only thing that
+     *  changes display size mid-engagement), which invalidates the plan — see
+     *  [onSpacerBoundsChanged]. */
+    private var plannedDisplay: Rect? = null
+
     /**
      * Status-bar visibility sampled from the overlay window's insets (OverlayService).
      * Hidden bars = the foreground app is immersive fullscreen, where One UI ignores
@@ -176,7 +182,8 @@ class EngagementController(
             // healthy split down. Skip, but keep the change pending — it re-applies
             // on the next video-app foreground event (retryPendingAdjust).
             val snap = settledPanes(service, st.packageName)
-            if (snap?.divider == null || snap.video == null) {
+            val divider = snap?.divider
+            if (divider == null || snap.video == null) {
                 pendingAdjust = true
                 _state.value = st
                 // st predates the suspensions above and bounds events are suppressed
@@ -187,6 +194,10 @@ class EngagementController(
             pendingAdjust = false
             // ponytail: failures past this point keep engage-path semantics
             // (Failed → spacer teardown); fail-soft needs adjustToPlan surgery.
+            //
+            // A rotation can have flipped the split to left/right under us (One UI
+            // re-lays the split out with the display); planning assumes top/bottom.
+            if (!ensureTopBottom(service, st.packageName, divider)) return@launch
             adjustToPlan(service, st.packageName, ratio, retriesLeft = 1, positionPrefOverride = pref)
             // The chips persist the pref BEFORE this adjust proves it achievable; if the
             // swap was unavailable, adjustToPlan re-planned for the side the video really
@@ -350,6 +361,24 @@ class EngagementController(
             val st = _state.value as? EngageState.Engaged ?: return@launch
             val service = DividerAccessibilityService.instance ?: return@launch
             val snap = service.panes(st.packageName) ?: return@launch
+            // The device rotated under the split: the display axes swapped, so the pane
+            // length that held the target ratio no longer does (and One UI may have
+            // re-laid the split out side-by-side). Re-plan for the new geometry instead
+            // of recording the now-wrong ratio as fact. A bounds change at the SAME
+            // display size is the user's own divider drag — never fought, only measured.
+            // Can't re-apply right now (ratio off, adjust in flight)? Fall through to the
+            // honest re-measure below and leave plannedDisplay stale so the next bounds
+            // event tries again.
+            val s = settings.state.value
+            if (snap.display != plannedDisplay && s.ratio != null && engageJob?.isActive != true) {
+                // Recorded here, not on success: an adjust that cannot land right now
+                // leaves pendingAdjust to retry it, and re-detecting the same rotation
+                // on every subsequent bounds event would spin.
+                android.util.Log.i(TAG, "rotation: $plannedDisplay -> ${snap.display}, re-applying")
+                plannedDisplay = snap.display
+                launchAdjust(st, service, s.ratio, s.positionPref)
+                return@launch
+            }
             val video = snap.video ?: return@launch
             _state.value = st.copy(
                 // The user may have swapped panes via the system's own divider popup:
@@ -459,18 +488,10 @@ class EngagementController(
             )
         }
 
-        // 2. Planning needs a horizontal divider (top/bottom panes — the only layout
-        //    where the full-width video pane can hit the exact ratio). A left/right
-        //    split (manual entry, or the swipe gesture docking to a side) is rotated
-        //    once via the divider popup.
+        // 2. Planning needs a horizontal divider — a left/right split is rotated once
+        //    via the divider popup (see ensureTopBottom).
         val divider = snap?.divider ?: return fail(FailReason.DIVIDER_LOST)
-        if (divider.width() < divider.height()) {
-            val rotated = SplitEntryDriver(service).rotateToTopBottom(ROTATE_TIMEOUT_MS) {
-                service.panes(pkg)?.divider?.let { it.width() >= it.height() } == true
-            }
-            if (abortRequested(service)) return
-            if (!rotated) return fail(FailReason.ADJUST_FAILED)
-        }
+        if (!ensureTopBottom(service, pkg, divider)) return
 
         // 3. Plan from *measured* geometry and drive the divider.
         adjustToPlan(service, pkg, ratio, retriesLeft = 1)
@@ -491,6 +512,9 @@ class EngagementController(
         val settled = settledPanes(service, pkg)
         val divider = settled?.divider ?: return fail(FailReason.DIVIDER_LOST)
         val display = settled.display
+        // The geometry this plan is valid for; a later bounds event reporting a
+        // different display means a rotation invalidated it (onSpacerBoundsChanged).
+        plannedDisplay = display
         if (abortRequested(service)) return
 
         // Prefer the measured inter-pane gap over the divider window bounds: some
@@ -654,16 +678,39 @@ class EngagementController(
         }
     }
 
-    /** Polls briefly for a snapshot whose divider is present — the divider window can
-     *  transiently disappear right after swap/drag animations. */
+    /** Polls briefly for a snapshot worth planning against. Returns the last read either
+     *  way — an unsettled snapshot is the caller's problem to report, not this one's. */
     private suspend fun settledPanes(service: DividerAccessibilityService, pkg: String): PaneSnapshot? {
+        var prev: PaneSnapshot? = null
         var snap: PaneSnapshot? = service.panes(pkg)
         var polls = DIVIDER_SETTLE_POLLS
-        while (snap?.divider == null && polls-- > 0) {
+        while (!isPlannable(snap, prev) && polls-- > 0) {
             delay(POLL_MS)
+            prev = snap
             snap = service.panes(pkg)
         }
         return snap
+    }
+
+    /**
+     * Divider present, every pane inside the display, and unchanged since the previous
+     * poll.
+     *
+     * The divider window transiently disappears for whole swap/drag animations. The
+     * other two conditions are the rotation case (measured on Fold8/One UI 9): the
+     * display config flips to the new orientation instantly while the a11y window
+     * bounds keep reporting animation-frame coordinates for ~0.5s — display 2504×2256
+     * with the video pane still at Rect(633,68-2863,2782) and a divider handle taller
+     * than wide, which made the axis check "correct" a perfectly good top/bottom split
+     * into a failed one. Both tests are needed: an intermediate frame can sit inside
+     * the display, and bounds can hold still for a poll while still being stale.
+     */
+    private fun isPlannable(snap: PaneSnapshot?, prev: PaneSnapshot?): Boolean {
+        val divider = snap?.divider ?: return false
+        if (!listOfNotNull(snap.video, snap.spacer, divider).all { snap.display.contains(it) }) {
+            return false
+        }
+        return snap == prev
     }
 
     // ---- helpers -----------------------------------------------------------------------------
@@ -673,6 +720,31 @@ class EngagementController(
         DividerAccessibilityService.instance !== service ||
             !service.isOnInnerDisplay() ||
             _posture.value == Posture.HALF_OPENED
+
+    /**
+     * Planning needs a horizontal divider (top/bottom panes — the only layout where the
+     * full-width video pane can hit the exact ratio). A left/right split (manual entry,
+     * the swipe gesture docking to a side, or a device rotation that re-laid the split
+     * out) is rotated once via the divider popup. False = the caller must stop; the
+     * abort or the failure has already been recorded.
+     */
+    private suspend fun ensureTopBottom(
+        service: DividerAccessibilityService,
+        pkg: String,
+        divider: Rect,
+    ): Boolean {
+        if (divider.width() >= divider.height()) return true
+        android.util.Log.i(TAG, "ensureTopBottom: rotating, divider=$divider")
+        val rotated = SplitEntryDriver(service).rotateToTopBottom(ROTATE_TIMEOUT_MS) {
+            service.panes(pkg)?.divider?.let { it.width() >= it.height() } == true
+        }
+        if (abortRequested(service)) return false
+        if (!rotated) {
+            fail(FailReason.ADJUST_FAILED)
+            return false
+        }
+        return true
+    }
 
     /** FIRST = top pane. Horizontal divider only — engageInternal rotates before planning. */
     private fun sideOf(pane: Rect, divider: Rect): PaneSide =

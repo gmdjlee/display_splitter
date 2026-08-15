@@ -2,6 +2,7 @@ package com.displaysplitter.geometry
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -38,6 +39,21 @@ class RatioMathTest {
         val plan = RatioMath.plan(portW, portH, divider, AspectRatio.R16_9, emptyList(), PositionPref.AUTO)
         assertTrue(plan.exactRatio)
         assertEquals(1107, plan.videoPaneLengthPx) // 1968 / (16/9)
+    }
+
+    /** Why a rotation has to re-apply the split rather than just be re-measured. */
+    @Test
+    fun `a portrait plan no longer holds the ratio after rotating to landscape`() {
+        val portrait = RatioMath.plan(portW, portH, divider, AspectRatio.R16_9, emptyList(), PositionPref.AUTO)
+        val landscape = RatioMath.plan(landW, landH, divider, AspectRatio.R16_9, emptyList(), PositionPref.AUTO)
+        assertTrue(portrait.exactRatio && landscape.exactRatio)
+        assertNotEquals(portrait.videoPaneLengthPx, landscape.videoPaneLengthPx)
+        // Keeping the portrait pane height across the rotation letterboxes again.
+        assertFalse(
+            RatioMath.isWithinTolerance(
+                RatioMath.achievedRatio(landW, portrait.videoPaneLengthPx), AspectRatio.R16_9,
+            ),
+        )
     }
 
     @Test
